@@ -1,6 +1,6 @@
-import { defineStore } from 'pinia'
+﻿import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import type { LoginResult } from '../types/api'
+import type { SessionProfile } from '../types/api'
 
 const TOKEN_KEY = 'wurenji-token'
 const PROFILE_KEY = 'wurenji-profile'
@@ -11,7 +11,7 @@ function readProfile() {
   if (!raw) return null
 
   try {
-    return JSON.parse(raw) as LoginResult
+    return JSON.parse(raw) as SessionProfile
   } catch {
     return null
   }
@@ -19,11 +19,11 @@ function readProfile() {
 
 export const useAuthStore = defineStore('auth', () => {
   const token = ref(localStorage.getItem(TOKEN_KEY) ?? '')
-  const profile = ref<LoginResult | null>(readProfile())
+  const profile = ref<SessionProfile | null>(readProfile())
 
   const isLoggedIn = computed(() => Boolean(token.value))
 
-  function setSession(result: LoginResult) {
+  function setSession(result: SessionProfile) {
     token.value = result.token
     profile.value = result
     localStorage.setItem(TOKEN_KEY, result.token)
@@ -33,9 +33,11 @@ export const useAuthStore = defineStore('auth', () => {
   function setDemoSession(username: string) {
     setSession({
       token: `demo-${Date.now()}`,
-      userId: 0,
-      roleId: 0,
+      username,
       realName: username || '演示用户',
+      role: 'demo',
+      roleId: 0,
+      userId: 0,
     })
   }
 

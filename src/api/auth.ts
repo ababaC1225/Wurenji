@@ -1,9 +1,12 @@
 import request from '../utils/request'
-import type { LoginPayload, LoginResult } from '../types/api'
+import type { LoginPayload, LoginResponse } from '../types/api'
 
 export function login(payload: LoginPayload) {
-  return request<LoginResult>('/login', {
+  return request<LoginResponse>('/auth/login', {
     method: 'POST',
-    body: payload,
+    query: {
+      username: payload.username,
+      password: payload.password,
+    },
   })
 }

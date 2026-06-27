@@ -1,8 +1,7 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { login } from '../api/auth'
-import { RequestError } from '../utils/request'
 import { useAuthStore } from '../stores/auth'
 
 const router = useRouter()
@@ -10,7 +9,7 @@ const auth = useAuthStore()
 
 const form = reactive({
   username: 'admin',
-  password: 'admin123',
+  password: '123456',
 })
 
 const loading = ref(false)
@@ -22,21 +21,20 @@ async function onSubmit() {
 
   try {
     const result = await login(form)
-    auth.setSession(result)
+    auth.setSession({
+      token: result.token,
+      username: result.username ?? form.username,
+      realName: result.realName ?? form.username,
+      role: result.role,
+      roleId: result.roleId ?? (result.role === 'admin' ? 1 : 2),
+      userId: result.userId ?? 0,
+    })
     await router.push('/')
   } catch (error) {
-    const statusCode = error instanceof RequestError ? error.code : undefined
-    const shouldFallbackToDemo =
-      statusCode === 502 || statusCode === 503 || statusCode === 504 || statusCode === undefined
-
-    if (shouldFallbackToDemo) {
-      auth.setDemoSession(form.username)
-      errorMessage.value = '后端暂不可用，已进入演示模式'
-      await router.push('/')
-      return
-    }
-
-    errorMessage.value = error instanceof Error ? error.message : '登录失败，请稍后重试'
+    const message = error instanceof Error ? error.message : '登录失败，请稍后重试'
+    errorMessage.value = message.includes('Bad Gateway')
+      ? '后端服务未连通，请确认 8082 端口已启动；也可以先点“演示模式”查看平台页面'
+      : message
   } finally {
     loading.value = false
   }
@@ -49,19 +47,17 @@ async function enterDemoMode() {
 </script>
 
 <template>
-  <div class="login-page">
+  <main class="login-page">
     <section class="login-hero">
-      <p class="eyebrow">云翼调度台</p>
-      <h1>一个干净的无人机管理入口。</h1>
-      <p>
-        后端就绪时自动走真实登录，暂时不可用时会切到本地演示，不会卡在错误页。
-      </p>
+      <p class="eyebrow">UAV ADMIN</p>
+      <h1>无人机管理平台</h1>
+      <p>请使用系统账号登录。后端服务启动后，页面将读取数据库中的真实业务数据。</p>
     </section>
 
     <section class="login-card card">
       <div class="login-card__head">
         <h2>系统登录</h2>
-        <p>后端可用时正常登录，不可用时自动进入演示模式</p>
+        <p>默认接口地址通过 Vite 代理转发到 http://localhost:8082。</p>
       </div>
 
       <form class="login-form" @submit.prevent="onSubmit">
@@ -84,105 +80,120 @@ async function enterDemoMode() {
 
         <div class="login-actions">
           <button class="primary-btn" :disabled="loading" type="submit">
-            {{ loading ? '登录中...' : '进入系统' }}
+            {{ loading ? '登录中...' : '进入平台' }}
           </button>
-          <button class="ghost-btn" type="button" @click="enterDemoMode">进入演示模式</button>
+          <button class="ghost-btn" type="button" @click="enterDemoMode">演示模式</button>
         </div>
-
-        <p class="login-tip">演示模式可直接查看当前界面，后端恢复后再次登录即可切换为真实数据。</p>
       </form>
     </section>
-  </div>
+  </main>
 </template>
 
 <style scoped>
 .login-page {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 1.1fr 0.9fr;
-  gap: 24px;
-  padding: 32px;
+  grid-template-columns: minmax(0, 1fr) 500px;
+  gap: 44px;
+  width: min(1120px, calc(100% - 48px));
+  margin: 0 auto;
+  padding: 56px 0;
   align-items: center;
+  font-size: 17px;
 }
 
 .login-hero {
-  padding: 24px;
-  max-width: 620px;
+  max-width: 760px;
+}
+
+.eyebrow {
+  color: var(--accent);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .login-hero h1 {
-  margin: 14px 0 16px;
-  font-size: clamp(2.4rem, 4vw, 4.8rem);
-  line-height: 1.02;
-  letter-spacing: -0.04em;
+  margin: 14px 0 18px;
+  font-size: clamp(2.6rem, 4vw, 4.4rem);
+  line-height: 1.12;
+  font-weight: 800;
 }
 
 .login-hero p {
+  max-width: 42rem;
   color: var(--text-soft);
-  font-size: 1.05rem;
-  max-width: 44rem;
+  font-size: 1.12rem;
+  line-height: 1.7;
 }
 
 .login-card {
-  max-width: 480px;
   width: 100%;
-  justify-self: end;
-  padding: 24px;
+  padding: 36px;
 }
 
 .login-card__head {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: 24px;
+  display: grid;
+  gap: 10px;
+  margin-bottom: 30px;
 }
 
-.login-card__head p {
-  color: var(--text-faint);
+.login-card__head h2 {
+  font-size: 1.55rem;
+  font-weight: 750;
+}
+
+.login-card__head p,
+.login-form span {
+  color: var(--text-soft);
 }
 
 .login-form {
   display: grid;
-  gap: 16px;
+  gap: 20px;
 }
 
 .login-form label {
   display: grid;
-  gap: 8px;
-}
-
-.login-form span {
-  color: var(--text-soft);
-  font-size: 0.92rem;
+  gap: 10px;
 }
 
 .login-form input {
+  width: 100%;
   border: 1px solid var(--line);
-  border-radius: 16px;
-  padding: 14px 16px;
-  background: rgba(255, 255, 255, 0.9);
+  border-radius: 8px;
+  padding: 16px 17px;
+  min-height: 54px;
+  background: rgba(255, 255, 255, 0.92);
   color: var(--text-main);
   outline: none;
+  font-size: 1rem;
 }
 
 .login-form input:focus {
-  border-color: rgba(15, 118, 110, 0.35);
+  border-color: rgba(15, 118, 110, 0.45);
   box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.08);
 }
 
-.form-error {
-  color: #b42318;
-  font-size: 0.92rem;
+.login-actions {
+  display: grid;
+  gap: 12px;
+}
+
+.primary-btn,
+.ghost-btn {
+  border-radius: 8px;
+  padding: 16px 18px;
+  min-height: 54px;
+  font-weight: 700;
+  cursor: pointer;
+  font-size: 1rem;
 }
 
 .primary-btn {
   border: 0;
-  border-radius: 16px;
-  padding: 14px 18px;
-  background: linear-gradient(135deg, #0f766e, #115e59);
+  background: #0f766e;
   color: #fff;
-  font-weight: 600;
-  cursor: pointer;
 }
 
 .primary-btn:disabled {
@@ -190,35 +201,33 @@ async function enterDemoMode() {
   cursor: not-allowed;
 }
 
-.login-actions {
-  display: grid;
-  gap: 10px;
-}
-
 .ghost-btn {
   border: 1px solid var(--line);
-  border-radius: 16px;
-  padding: 13px 18px;
-  background: rgba(255, 255, 255, 0.7);
+  background: rgba(255, 255, 255, 0.72);
   color: var(--text-main);
-  cursor: pointer;
 }
 
-.login-tip {
-  color: var(--text-faint);
-  font-size: 0.88rem;
+.form-error {
+  color: #b42318;
   line-height: 1.6;
 }
 
-@media (max-width: 920px) {
+@media (max-width: 900px) {
   .login-page {
     grid-template-columns: 1fr;
-    padding: 20px;
+    width: min(100% - 28px, 720px);
+    padding: 28px 0;
+    gap: 24px;
   }
 
   .login-card {
-    justify-self: stretch;
     max-width: none;
+    justify-self: stretch;
+    padding: 30px;
+  }
+
+  .login-hero h1 {
+    font-size: clamp(2.7rem, 12vw, 4.4rem);
   }
 }
 </style>

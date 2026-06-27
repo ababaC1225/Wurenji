@@ -1,13 +1,14 @@
 import request from '../utils/request'
+import type { DroneHealthItem, OrderFulfillmentItem, TaskMonitorItem } from '../types/api'
 
 export function fetchTaskMonitor() {
-  return request<Record<string, unknown>>('/view/taskMonitor')
+  return request<TaskMonitorItem[]>('/stat/taskMonitor')
 }
 
 export function fetchDroneHealth() {
-  return request<Record<string, unknown>>('/view/droneHealth')
+  return request<DroneHealthItem[]>('/stat/droneHealth')
 }
 
 export function fetchOrderFulfill() {
-  return request<Record<string, unknown>>('/view/orderFulfill')
+  return request<OrderFulfillmentItem[]>('/stat/orderFulfillment')
 }
