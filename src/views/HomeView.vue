@@ -1,11 +1,18 @@
 ﻿<script setup lang="ts">
 import { computed, onMounted, reactive, ref, watchEffect } from 'vue'
 import { useRouter } from 'vue-router'
-import { addDrone, fetchDroneList, updateDroneStatus } from '../api/drone'
+import { addDrone, fetchDroneList, searchDrones, updateDroneStatus } from '../api/drone'
 import { createOrder, generateOrderTask } from '../api/order'
-import { fetchSchedulerOrderPage } from '../api/scheduler'
-import { fetchAlarmPage, handleAlarm } from '../api/maintenance'
-import { createUser, fetchUserPage, updateUser, updateUserStatus } from '../api/sys'
+import {
+  fetchRoutePage,
+  fetchSchedulerOrderPage,
+  fetchTaskPage,
+  searchRoutePage,
+  searchSchedulerOrders,
+  searchTaskPage,
+} from '../api/scheduler'
+import { fetchAlarmPage, handleAlarm, searchAlarmPage } from '../api/maintenance'
+import { createUser, fetchUserPage, searchUserPage, updateUser, updateUserStatus } from '../api/sys'
 import { fetchDroneHealth, fetchOrderFulfill, fetchTaskMonitor } from '../api/view'
 import { useAuthStore } from '../stores/auth'
 import type {
@@ -13,6 +20,8 @@ import type {
   CustomerOrderItem,
   DroneHealthItem,
   DroneItem,
+  FlightTaskItem,
+  RouteItem,
   SysUser,
   TaskMonitorItem,
   UserForm,
@@ -31,18 +40,57 @@ const actionError = ref('')
 
 const drones = ref<DroneItem[]>([])
 const orders = ref<CustomerOrderItem[]>([])
+const routes = ref<RouteItem[]>([])
+const tasks = ref<FlightTaskItem[]>([])
 const alarms = ref<AlarmEventItem[]>([])
 const users = ref<SysUser[]>([])
 const taskMonitor = ref<TaskMonitorItem[]>([])
 const droneHealth = ref<DroneHealthItem[]>([])
 const orderTotal = ref(0)
+const routeTotal = ref(0)
+const taskTotal = ref(0)
 const alarmTotal = ref(0)
 const userTotal = ref(0)
 const editingUserId = ref<number | null>(null)
 
 const orderPage = reactive({ current: 1, size: 8 })
+const routePage = reactive({ current: 1, size: 8 })
+const taskPage = reactive({ current: 1, size: 8 })
 const alarmPage = reactive({ current: 1, size: 8 })
 const userPage = reactive({ current: 1, size: 8 })
+const droneFilter = reactive({
+  droneCode: '',
+  model: '',
+  status: '',
+  parkId: undefined as number | undefined,
+})
+const orderFilter = reactive({
+  orderNo: '',
+  orderStatus: '',
+  priority: '',
+})
+const routeFilter = reactive({
+  routeName: '',
+  riskLevel: '',
+  enabled: undefined as number | undefined,
+})
+const taskFilter = reactive({
+  taskStatus: '',
+  droneId: undefined as number | undefined,
+  orderId: undefined as number | undefined,
+})
+const alarmFilter = reactive({
+  alarmType: '',
+  alarmLevel: '',
+  alarmStatus: '',
+  droneId: undefined as number | undefined,
+})
+const userFilter = reactive({
+  username: '',
+  realName: '',
+  roleId: undefined as number | undefined,
+  status: undefined as number | undefined,
+})
 
 const droneForm = reactive<DroneItem>({
   droneCode: '',
@@ -150,6 +198,16 @@ const demoOrders: CustomerOrderItem[] = [
   { orderId: 2, orderNo: 'ORD-20260627-002', cargoName: '快递包裹', cargoWeight: 2.5, priority: '普通', orderStatus: '待审核', createdAt: '2026-06-27T10:15:00' },
 ]
 
+const demoRoutes: RouteItem[] = [
+  { routeId: 1, routeName: '总部到南区航线', startPointId: 1, endPointId: 3, distanceKm: 8.4, estimateMinutes: 22, riskLevel: '低', enabled: 1 },
+  { routeId: 2, routeName: '总部到东区航线', startPointId: 1, endPointId: 4, distanceKm: 12.6, estimateMinutes: 31, riskLevel: '中', enabled: 1 },
+]
+
+const demoFlightTasks: FlightTaskItem[] = [
+  { taskId: 1, orderId: 1, droneId: 2, routeId: 1, taskStatus: '执行中', plannedStartTime: '2026-06-27T10:30:00' },
+  { taskId: 2, orderId: 2, droneId: 1, routeId: 2, taskStatus: '待起飞', plannedStartTime: '2026-06-27T11:00:00' },
+]
+
 const demoAlarms: AlarmEventItem[] = [
   { alarmId: 1, droneId: 3, alarmType: '电量过低', alarmLevel: '警告', alarmStatus: '待处理', alarmTime: '2026-06-27T10:00:00' },
   { alarmId: 2, droneId: 2, alarmType: '设备异常', alarmLevel: '严重', alarmStatus: '已处理', alarmTime: '2026-06-27T09:10:00', handleResult: '已安排返航检修' },
@@ -190,10 +248,14 @@ function applyDemoData() {
   fallbackMode.value = true
   drones.value = demoDrones.map((item) => ({ ...item }))
   orders.value = demoOrders.map((item) => ({ ...item }))
+  routes.value = demoRoutes.map((item) => ({ ...item }))
+  tasks.value = demoFlightTasks.map((item) => ({ ...item }))
   alarms.value = demoAlarms.map((item) => ({ ...item }))
   users.value = demoUsers.map((item) => ({ ...item }))
   applyDemoOverview()
   orderTotal.value = demoOrders.length
+  routeTotal.value = demoRoutes.length
+  taskTotal.value = demoFlightTasks.length
   alarmTotal.value = demoAlarms.length
   userTotal.value = demoUsers.length
 }
@@ -296,6 +358,20 @@ function pageItems<T>(page: { list?: T[]; records?: T[] }) {
   return page.list ?? page.records ?? []
 }
 
+function cleanQuery<T extends Record<string, unknown>>(params: T) {
+  return Object.fromEntries(
+    Object.entries(params).filter(([, value]) => value !== '' && value !== undefined && value !== null),
+  ) as Partial<T>
+}
+
+function hasQuery(params: Record<string, unknown>) {
+  return Object.keys(cleanQuery(params)).length > 0
+}
+
+function includesText(value: unknown, keyword: string) {
+  return !keyword || String(value ?? '').toLowerCase().includes(keyword.toLowerCase())
+}
+
 function roleNameOf(roleId?: number) {
   return roleOptions.find((role) => role.roleId === roleId)?.roleName ?? `角色 ${roleId ?? '-'}`
 }
@@ -358,12 +434,20 @@ async function loadOverview() {
 
 async function loadDrones() {
   if (auth.token.startsWith('demo-') || fallbackMode.value) {
-    if (!drones.value.length) drones.value = demoDrones.map((item) => ({ ...item }))
+    drones.value = demoDrones
+      .filter(
+        (item) =>
+          includesText(item.droneCode, droneFilter.droneCode) &&
+          includesText(item.model, droneFilter.model) &&
+          (!droneFilter.status || item.status === droneFilter.status) &&
+          (!droneFilter.parkId || item.parkId === droneFilter.parkId),
+      )
+      .map((item) => ({ ...item }))
     return
   }
 
   try {
-    drones.value = await fetchDroneList()
+    drones.value = hasQuery(droneFilter) ? await searchDrones(cleanQuery(droneFilter)) : await fetchDroneList()
   } catch {
     drones.value = demoDrones.map((item) => ({ ...item }))
     useMockData('无人机接口不可用，已使用 mock 数据')
@@ -372,13 +456,22 @@ async function loadDrones() {
 
 async function loadOrders() {
   if (auth.token.startsWith('demo-') || fallbackMode.value) {
-    if (!orders.value.length) orders.value = demoOrders.map((item) => ({ ...item }))
+    orders.value = demoOrders
+      .filter(
+        (item) =>
+          includesText(item.orderNo, orderFilter.orderNo) &&
+          (!orderFilter.orderStatus || item.orderStatus === orderFilter.orderStatus) &&
+          (!orderFilter.priority || item.priority === orderFilter.priority),
+      )
+      .map((item) => ({ ...item }))
     orderTotal.value = orders.value.length
     return
   }
 
   try {
-    const page = await fetchSchedulerOrderPage(orderPage)
+    const page = hasQuery(orderFilter)
+      ? await searchSchedulerOrders({ ...cleanQuery(orderFilter), ...orderPage })
+      : await fetchSchedulerOrderPage(orderPage)
     orders.value = pageItems<CustomerOrderItem>(page)
     orderTotal.value = page.total
   } catch {
@@ -388,15 +481,79 @@ async function loadOrders() {
   }
 }
 
+async function loadRoutes() {
+  if (auth.token.startsWith('demo-') || fallbackMode.value) {
+    routes.value = demoRoutes
+      .filter(
+        (item) =>
+          includesText(item.routeName, routeFilter.routeName) &&
+          (!routeFilter.riskLevel || item.riskLevel === routeFilter.riskLevel) &&
+          (routeFilter.enabled === undefined || item.enabled === routeFilter.enabled),
+      )
+      .map((item) => ({ ...item }))
+    routeTotal.value = routes.value.length
+    return
+  }
+
+  try {
+    const page = hasQuery(routeFilter)
+      ? await searchRoutePage({ ...cleanQuery(routeFilter), ...routePage })
+      : await fetchRoutePage(routePage)
+    routes.value = pageItems<RouteItem>(page)
+    routeTotal.value = page.total
+  } catch {
+    routes.value = demoRoutes.map((item) => ({ ...item }))
+    routeTotal.value = routes.value.length
+    useMockData('航线接口不可用，已使用 mock 数据')
+  }
+}
+
+async function loadTasks() {
+  if (auth.token.startsWith('demo-') || fallbackMode.value) {
+    tasks.value = demoFlightTasks
+      .filter(
+        (item) =>
+          (!taskFilter.taskStatus || item.taskStatus === taskFilter.taskStatus) &&
+          (!taskFilter.droneId || item.droneId === taskFilter.droneId) &&
+          (!taskFilter.orderId || item.orderId === taskFilter.orderId),
+      )
+      .map((item) => ({ ...item }))
+    taskTotal.value = tasks.value.length
+    return
+  }
+
+  try {
+    const page = hasQuery(taskFilter)
+      ? await searchTaskPage({ ...cleanQuery(taskFilter), ...taskPage })
+      : await fetchTaskPage(taskPage)
+    tasks.value = pageItems<FlightTaskItem>(page)
+    taskTotal.value = page.total
+  } catch {
+    tasks.value = demoFlightTasks.map((item) => ({ ...item }))
+    taskTotal.value = tasks.value.length
+    useMockData('任务接口不可用，已使用 mock 数据')
+  }
+}
+
 async function loadAlarms() {
   if (auth.token.startsWith('demo-') || fallbackMode.value) {
-    if (!alarms.value.length) alarms.value = demoAlarms.map((item) => ({ ...item }))
+    alarms.value = demoAlarms
+      .filter(
+        (item) =>
+          includesText(item.alarmType, alarmFilter.alarmType) &&
+          (!alarmFilter.alarmLevel || item.alarmLevel === alarmFilter.alarmLevel) &&
+          (!alarmFilter.alarmStatus || item.alarmStatus === alarmFilter.alarmStatus) &&
+          (!alarmFilter.droneId || item.droneId === alarmFilter.droneId),
+      )
+      .map((item) => ({ ...item }))
     alarmTotal.value = alarms.value.length
     return
   }
 
   try {
-    const page = await fetchAlarmPage(alarmPage)
+    const page = hasQuery(alarmFilter)
+      ? await searchAlarmPage({ ...cleanQuery(alarmFilter), ...alarmPage })
+      : await fetchAlarmPage(alarmPage)
     alarms.value = pageItems<AlarmEventItem>(page)
     alarmTotal.value = page.total
   } catch {
@@ -408,13 +565,23 @@ async function loadAlarms() {
 
 async function loadUsers() {
   if (auth.token.startsWith('demo-') || fallbackMode.value) {
-    if (!users.value.length) users.value = demoUsers.map((item) => ({ ...item }))
+    users.value = demoUsers
+      .filter(
+        (item) =>
+          includesText(item.username, userFilter.username) &&
+          includesText(item.realName, userFilter.realName) &&
+          (!userFilter.roleId || item.roleId === userFilter.roleId) &&
+          (userFilter.status === undefined || item.status === userFilter.status),
+      )
+      .map((item) => ({ ...item }))
     userTotal.value = users.value.length
     return
   }
 
   try {
-    const page = await fetchUserPage(userPage)
+    const page = hasQuery(userFilter)
+      ? await searchUserPage({ ...cleanQuery(userFilter), ...userPage })
+      : await fetchUserPage(userPage)
     users.value = pageItems<SysUser>(page)
     userTotal.value = page.total
   } catch {
@@ -428,8 +595,72 @@ async function loadAll() {
   loading.value = true
   actionError.value = ''
 
-  await Promise.allSettled([loadOverview(), loadDrones(), loadOrders(), loadAlarms(), loadUsers()])
+  await Promise.allSettled([loadOverview(), loadDrones(), loadOrders(), loadRoutes(), loadTasks(), loadAlarms(), loadUsers()])
   loading.value = false
+}
+
+async function applyDroneSearch() {
+  await loadDrones()
+}
+
+async function resetDroneSearch() {
+  Object.assign(droneFilter, { droneCode: '', model: '', status: '', parkId: undefined })
+  await loadDrones()
+}
+
+async function applyOrderSearch() {
+  orderPage.current = 1
+  await loadOrders()
+}
+
+async function resetOrderSearch() {
+  Object.assign(orderFilter, { orderNo: '', orderStatus: '', priority: '' })
+  orderPage.current = 1
+  await loadOrders()
+}
+
+async function applyRouteSearch() {
+  routePage.current = 1
+  await loadRoutes()
+}
+
+async function resetRouteSearch() {
+  Object.assign(routeFilter, { routeName: '', riskLevel: '', enabled: undefined })
+  routePage.current = 1
+  await loadRoutes()
+}
+
+async function applyTaskSearch() {
+  taskPage.current = 1
+  await loadTasks()
+}
+
+async function resetTaskSearch() {
+  Object.assign(taskFilter, { taskStatus: '', droneId: undefined, orderId: undefined })
+  taskPage.current = 1
+  await loadTasks()
+}
+
+async function applyAlarmSearch() {
+  alarmPage.current = 1
+  await loadAlarms()
+}
+
+async function resetAlarmSearch() {
+  Object.assign(alarmFilter, { alarmType: '', alarmLevel: '', alarmStatus: '', droneId: undefined })
+  alarmPage.current = 1
+  await loadAlarms()
+}
+
+async function applyUserSearch() {
+  userPage.current = 1
+  await loadUsers()
+}
+
+async function resetUserSearch() {
+  Object.assign(userFilter, { username: '', realName: '', roleId: undefined, status: undefined })
+  userPage.current = 1
+  await loadUsers()
 }
 
 async function submitDrone() {
@@ -707,20 +938,15 @@ onMounted(loadAll)
       </section>
 
       <section v-else-if="activeTab === 'drones'" class="split-layout">
-        <section v-if="can('drone:add')" class="card form-panel">
-          <div class="section-title"><h2>新增无人机</h2></div>
-          <form class="field-grid" @submit.prevent="submitDrone">
-            <label><span>编号</span><input v-model="droneForm.droneCode" required placeholder="UAV-005" /></label>
-            <label><span>型号</span><input v-model="droneForm.model" placeholder="DJI M300" /></label>
-            <label><span>园区 ID</span><input v-model.number="droneForm.parkId" type="number" min="1" /></label>
-            <label><span>最大载重 kg</span><input v-model.number="droneForm.maxPayload" type="number" min="0" step="0.1" /></label>
-            <label><span>电池容量</span><input v-model.number="droneForm.batteryCapacity" type="number" min="0" max="100" /></label>
-            <button class="primary-btn" type="submit">新增无人机</button>
-          </form>
-        </section>
-
         <section class="card table-panel">
-          <div class="section-title"><h2>无人机列表</h2><button class="text-btn" @click="loadDrones">刷新</button></div>
+          <div class="section-title"><h2>无人机条件查询</h2><button class="text-btn" @click="loadDrones">刷新</button></div>
+          <form class="filter-grid" @submit.prevent="applyDroneSearch">
+            <label><span>编号</span><input v-model="droneFilter.droneCode" placeholder="UAV" /></label>
+            <label><span>型号</span><input v-model="droneFilter.model" placeholder="M300" /></label>
+            <label><span>状态</span><select v-model="droneFilter.status"><option value="">全部</option><option>空闲</option><option>任务中</option><option>维护中</option><option>停用</option></select></label>
+            <label><span>园区 ID</span><input v-model.number="droneFilter.parkId" type="number" min="1" /></label>
+            <div class="filter-actions"><button class="outline-btn" type="button" @click="resetDroneSearch">重置</button><button class="primary-btn" type="submit">查询</button></div>
+          </form>
           <div class="table drone-table">
             <div class="table-row table-head"><span>编号</span><span>型号</span><span>载重</span><span>电量</span><span>健康</span><span>状态</span><span>操作</span></div>
             <div v-for="item in drones" :key="item.droneId" class="table-row">
@@ -735,9 +961,71 @@ onMounted(loadAll)
             </div>
           </div>
         </section>
+
+        <section v-if="can('drone:add')" class="card form-panel">
+          <div class="section-title"><h2>新增无人机</h2></div>
+          <form class="field-grid" @submit.prevent="submitDrone">
+            <label><span>编号</span><input v-model="droneForm.droneCode" required placeholder="UAV-005" /></label>
+            <label><span>型号</span><input v-model="droneForm.model" placeholder="DJI M300" /></label>
+            <label><span>园区 ID</span><input v-model.number="droneForm.parkId" type="number" min="1" /></label>
+            <label><span>最大载重 kg</span><input v-model.number="droneForm.maxPayload" type="number" min="0" step="0.1" /></label>
+            <label><span>电池容量</span><input v-model.number="droneForm.batteryCapacity" type="number" min="0" max="100" /></label>
+            <button class="primary-btn" type="submit">新增无人机</button>
+          </form>
+        </section>
       </section>
 
       <section v-else-if="activeTab === 'orders'" class="split-layout">
+        <section class="card table-panel">
+          <div class="section-title"><h2>订单条件查询</h2><button class="text-btn" @click="loadOrders">刷新</button></div>
+          <form class="filter-grid" @submit.prevent="applyOrderSearch">
+            <label><span>订单号</span><input v-model="orderFilter.orderNo" placeholder="ORD" /></label>
+            <label><span>状态</span><select v-model="orderFilter.orderStatus"><option value="">全部</option><option>待审核</option><option>执行中</option><option>已完成</option><option>已取消</option></select></label>
+            <label><span>优先级</span><select v-model="orderFilter.priority"><option value="">全部</option><option>普通</option><option>加急</option></select></label>
+            <div class="filter-actions"><button class="outline-btn" type="button" @click="resetOrderSearch">重置</button><button class="primary-btn" type="submit">查询</button></div>
+          </form>
+          <div class="table order-table">
+            <div class="table-row table-head"><span>订单号</span><span>货物</span><span>重量</span><span>优先级</span><span>状态</span><span>创建时间</span><span>操作</span></div>
+            <div v-for="item in orders" :key="item.orderId" class="table-row">
+              <span>{{ item.orderNo ?? item.orderId }}</span><span>{{ item.cargoName ?? '-' }}</span><span>{{ item.cargoWeight ?? '-' }}</span><span>{{ item.priority ?? '-' }}</span><span>{{ item.orderStatus ?? '-' }}</span><span>{{ formatDate(item.createdAt) }}</span><span><button v-if="can('task:add')" class="text-btn" @click="generateTask(item)">生成任务</button><span v-else>-</span></span>
+            </div>
+          </div>
+        </section>
+
+        <section class="card table-panel">
+          <div class="section-title"><h2>航线条件查询</h2><button class="text-btn" @click="loadRoutes">刷新</button></div>
+          <form class="filter-grid" @submit.prevent="applyRouteSearch">
+            <label><span>航线名称</span><input v-model="routeFilter.routeName" placeholder="南区" /></label>
+            <label><span>风险等级</span><select v-model="routeFilter.riskLevel"><option value="">全部</option><option>低</option><option>中</option><option>高</option></select></label>
+            <label><span>启用状态</span><select v-model.number="routeFilter.enabled"><option :value="undefined">全部</option><option :value="1">启用</option><option :value="0">停用</option></select></label>
+            <div class="filter-actions"><button class="outline-btn" type="button" @click="resetRouteSearch">重置</button><button class="primary-btn" type="submit">查询</button></div>
+          </form>
+          <div class="table route-table">
+            <div class="table-row table-head"><span>ID</span><span>名称</span><span>起点</span><span>终点</span><span>距离</span><span>预计分钟</span><span>风险</span><span>状态</span></div>
+            <div v-for="item in routes" :key="item.routeId" class="table-row">
+              <span>{{ item.routeId ?? '-' }}</span><span>{{ item.routeName }}</span><span>{{ item.startPointId ?? '-' }}</span><span>{{ item.endPointId ?? '-' }}</span><span>{{ item.distanceKm ?? '-' }}</span><span>{{ item.estimateMinutes ?? '-' }}</span><span>{{ item.riskLevel ?? '-' }}</span><span>{{ item.enabled === 0 ? '停用' : '启用' }}</span>
+            </div>
+            <p v-if="!routes.length" class="empty-state">暂无航线数据</p>
+          </div>
+        </section>
+
+        <section class="card table-panel">
+          <div class="section-title"><h2>任务条件查询</h2><button class="text-btn" @click="loadTasks">刷新</button></div>
+          <form class="filter-grid" @submit.prevent="applyTaskSearch">
+            <label><span>任务状态</span><select v-model="taskFilter.taskStatus"><option value="">全部</option><option>待起飞</option><option>执行中</option><option>已完成</option><option>已取消</option></select></label>
+            <label><span>无人机 ID</span><input v-model.number="taskFilter.droneId" type="number" min="1" /></label>
+            <label><span>订单 ID</span><input v-model.number="taskFilter.orderId" type="number" min="1" /></label>
+            <div class="filter-actions"><button class="outline-btn" type="button" @click="resetTaskSearch">重置</button><button class="primary-btn" type="submit">查询</button></div>
+          </form>
+          <div class="table task-table">
+            <div class="table-row table-head"><span>ID</span><span>订单</span><span>无人机</span><span>航线</span><span>调度员</span><span>状态</span><span>计划开始</span><span>实际结束</span></div>
+            <div v-for="item in tasks" :key="item.taskId" class="table-row">
+              <span>{{ item.taskId ?? '-' }}</span><span>{{ item.orderId ?? '-' }}</span><span>{{ item.droneId ?? '-' }}</span><span>{{ item.routeId ?? '-' }}</span><span>{{ item.dispatcherId ?? '-' }}</span><span>{{ item.taskStatus ?? '-' }}</span><span>{{ formatDate(item.plannedStartTime) }}</span><span>{{ formatDate(item.actualEndTime) }}</span>
+            </div>
+            <p v-if="!tasks.length" class="empty-state">暂无任务数据</p>
+          </div>
+        </section>
+
         <section v-if="can('order:add')" class="card form-panel">
           <div class="section-title"><h2>创建订单</h2></div>
           <form class="field-grid" @submit.prevent="submitOrder">
@@ -749,20 +1037,17 @@ onMounted(loadAll)
             <button class="primary-btn" type="submit">创建订单</button>
           </form>
         </section>
-
-        <section class="card table-panel">
-          <div class="section-title"><h2>订单列表</h2><button class="text-btn" @click="loadOrders">刷新</button></div>
-          <div class="table order-table">
-            <div class="table-row table-head"><span>订单号</span><span>货物</span><span>重量</span><span>优先级</span><span>状态</span><span>创建时间</span><span>操作</span></div>
-            <div v-for="item in orders" :key="item.orderId" class="table-row">
-              <span>{{ item.orderNo ?? item.orderId }}</span><span>{{ item.cargoName ?? '-' }}</span><span>{{ item.cargoWeight ?? '-' }}</span><span>{{ item.priority ?? '-' }}</span><span>{{ item.orderStatus ?? '-' }}</span><span>{{ formatDate(item.createdAt) }}</span><span><button v-if="can('task:add')" class="text-btn" @click="generateTask(item)">生成任务</button><span v-else>-</span></span>
-            </div>
-          </div>
-        </section>
       </section>
 
       <section v-else-if="activeTab === 'alarms'" class="card table-panel full-width">
-        <div class="section-title"><h2>告警维护</h2><button class="text-btn" @click="loadAlarms">刷新</button></div>
+        <div class="section-title"><h2>告警条件查询</h2><button class="text-btn" @click="loadAlarms">刷新</button></div>
+        <form class="filter-grid" @submit.prevent="applyAlarmSearch">
+          <label><span>类型</span><input v-model="alarmFilter.alarmType" placeholder="电量" /></label>
+          <label><span>等级</span><select v-model="alarmFilter.alarmLevel"><option value="">全部</option><option>提示</option><option>警告</option><option>严重</option></select></label>
+          <label><span>状态</span><select v-model="alarmFilter.alarmStatus"><option value="">全部</option><option>待处理</option><option>已处理</option></select></label>
+          <label><span>无人机 ID</span><input v-model.number="alarmFilter.droneId" type="number" min="1" /></label>
+          <div class="filter-actions"><button class="outline-btn" type="button" @click="resetAlarmSearch">重置</button><button class="primary-btn" type="submit">查询</button></div>
+        </form>
         <div class="table alarm-table">
           <div class="table-row table-head"><span>ID</span><span>无人机</span><span>类型</span><span>等级</span><span>状态</span><span>时间</span><span>处理结果</span><span>操作</span></div>
           <div v-for="item in alarms" :key="item.alarmId" class="table-row">
@@ -772,6 +1057,23 @@ onMounted(loadAll)
       </section>
 
       <section v-else class="split-layout">
+        <section class="card table-panel">
+          <div class="section-title"><h2>用户条件查询</h2><button class="text-btn" @click="loadUsers">刷新</button></div>
+          <form class="filter-grid" @submit.prevent="applyUserSearch">
+            <label><span>用户名</span><input v-model="userFilter.username" placeholder="admin" /></label>
+            <label><span>姓名</span><input v-model="userFilter.realName" placeholder="管理员" /></label>
+            <label><span>角色</span><select v-model.number="userFilter.roleId"><option :value="undefined">全部</option><option v-for="role in roleOptions" :key="role.roleId" :value="role.roleId">{{ role.roleName }}</option></select></label>
+            <label><span>状态</span><select v-model.number="userFilter.status"><option :value="undefined">全部</option><option :value="1">正常</option><option :value="0">停用</option></select></label>
+            <div class="filter-actions"><button class="outline-btn" type="button" @click="resetUserSearch">重置</button><button class="primary-btn" type="submit">查询</button></div>
+          </form>
+          <div class="table user-table">
+            <div class="table-row table-head"><span>ID</span><span>用户名</span><span>姓名</span><span>角色</span><span>状态</span><span>操作</span></div>
+            <div v-for="item in users" :key="item.userId" class="table-row">
+              <span>{{ item.userId }}</span><span>{{ item.username }}</span><span>{{ item.realName }}</span><span>{{ roleNameOf(item.roleId) }}</span><span>{{ statusText(item.status) }}</span><span class="row-actions"><button v-if="can('user:update')" class="text-btn" @click="editUser(item)">编辑</button><button v-if="can('user:update')" class="text-btn" @click="toggleUserStatus(item)">{{ item.status === 0 ? '启用' : '停用' }}</button><span v-if="!can('user:update')">-</span></span>
+            </div>
+          </div>
+        </section>
+
         <section v-if="can('user:add') || can('user:update')" class="card form-panel">
           <div class="section-title"><h2>{{ editingUserId ? '编辑用户' : '新增用户' }}</h2></div>
           <form class="field-grid" @submit.prevent="submitUser">
@@ -784,16 +1086,6 @@ onMounted(loadAll)
             <label class="full-width"><span>权限代码</span><input v-model="userForm.permissions" placeholder="user:query,drone:query,order:add" /></label>
             <div class="button-row"><button class="outline-btn" type="button" @click="resetUserForm">清空</button><button class="primary-btn" type="submit">保存用户</button></div>
           </form>
-        </section>
-
-        <section class="card table-panel">
-          <div class="section-title"><h2>用户列表</h2><button class="text-btn" @click="loadUsers">刷新</button></div>
-          <div class="table user-table">
-            <div class="table-row table-head"><span>ID</span><span>用户名</span><span>姓名</span><span>角色</span><span>状态</span><span>操作</span></div>
-            <div v-for="item in users" :key="item.userId" class="table-row">
-              <span>{{ item.userId }}</span><span>{{ item.username }}</span><span>{{ item.realName }}</span><span>{{ roleNameOf(item.roleId) }}</span><span>{{ statusText(item.status) }}</span><span class="row-actions"><button v-if="can('user:update')" class="text-btn" @click="editUser(item)">编辑</button><button v-if="can('user:update')" class="text-btn" @click="toggleUserStatus(item)">{{ item.status === 0 ? '启用' : '停用' }}</button><span v-if="!can('user:update')">-</span></span>
-            </div>
-          </div>
         </section>
       </section>
     </main>
@@ -1014,13 +1306,32 @@ select {
 .split-layout > .table-panel { width: 100%; }
 
 .field-grid,
+.filter-grid,
 .health-list { display: grid; gap: 18px; }
 .form-panel .field-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: end; }
 .form-panel .field-grid .primary-btn,
 .form-panel .field-grid .button-row { align-self: end; }
 .form-panel .field-grid > .primary-btn { width: 100%; min-height: 50px; }
-.field-grid label { display: grid; gap: 10px; }
+.filter-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+  align-items: end;
+  margin-top: 18px;
+  padding: 16px;
+  border-radius: 10px;
+  background: rgba(248, 250, 252, 0.86);
+}
+.filter-actions {
+  display: flex;
+  gap: 10px;
+}
+.filter-actions .outline-btn,
+.filter-actions .primary-btn {
+  min-width: 74px;
+}
+.field-grid label,
+.filter-grid label { display: grid; gap: 10px; }
 .field-grid span,
+.filter-grid span,
 .empty-state,
 .health-item span { color: #64748b; }
 
@@ -1067,6 +1378,8 @@ select:focus { border-color: rgba(15, 118, 110, 0.55); box-shadow: 0 0 0 3px rgb
 .compact-table .table-row { grid-template-columns: 80px 1.2fr 1fr 1fr 1.2fr; }
 .drone-table .table-row,
 .order-table .table-row { grid-template-columns: 1.1fr 1fr 0.7fr 0.7fr 0.7fr 0.9fr 1.3fr; }
+.route-table .table-row,
+.task-table .table-row { grid-template-columns: 70px 1.2fr 0.75fr 0.75fr 0.75fr 0.9fr 0.9fr 1fr; }
 .alarm-table .table-row { grid-template-columns: 70px 90px 1fr 0.8fr 0.9fr 1.2fr 1.4fr 1fr; }
 .user-table .table-row { grid-template-columns: 70px 1fr 1fr 0.9fr 0.8fr 1.4fr; }
 
@@ -1084,6 +1397,8 @@ select:focus { border-color: rgba(15, 118, 110, 0.55); box-shadow: 0 0 0 3px rgb
   .wide-panel,
   .side-panel { grid-column: span 12; }
   .form-panel .field-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .filter-actions { grid-column: 1 / -1; }
 }
 
 @media (max-width: 720px) {
@@ -1106,7 +1421,9 @@ select:focus { border-color: rgba(15, 118, 110, 0.55); box-shadow: 0 0 0 3px rgb
   .wide-panel,
   .table-panel,
   .side-panel { grid-column: auto; }
-  .form-panel .field-grid { grid-template-columns: 1fr; }
+  .form-panel .field-grid,
+  .filter-grid { grid-template-columns: 1fr; }
+  .filter-actions { grid-column: auto; }
   .table,
   .compact-table { overflow-x: visible; }
   .table-head { display: none; }
@@ -1114,6 +1431,8 @@ select:focus { border-color: rgba(15, 118, 110, 0.55); box-shadow: 0 0 0 3px rgb
   .compact-table .table-row,
   .drone-table .table-row,
   .order-table .table-row,
+  .route-table .table-row,
+  .task-table .table-row,
   .alarm-table .table-row,
   .user-table .table-row { min-width: 0; grid-template-columns: 1fr; gap: 8px; padding: 14px; }
   .table-row span { min-width: 0; overflow-wrap: anywhere; }
