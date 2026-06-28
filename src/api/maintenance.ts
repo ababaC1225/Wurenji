@@ -18,6 +18,19 @@ export function fetchAlarmPage(params: { current?: number; size?: number } = {})
   return request<PageResult<AlarmEventItem>>(`/maintain/alarm/page${suffix}`)
 }
 
+export function searchAlarmPage(params: {
+  droneId?: number
+  alarmType?: string
+  alarmLevel?: string
+  alarmStatus?: string
+  current?: number
+  size?: number
+} = {}) {
+  return request<PageResult<AlarmEventItem>>('/maintain/alarm/search', {
+    query: params,
+  })
+}
+
 export function handleAlarm(payload: AlarmEventItem) {
   return request<void>('/maintain/alarm/handle', {
     method: 'PUT',

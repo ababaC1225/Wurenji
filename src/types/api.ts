@@ -17,6 +17,7 @@ export interface LoginResponse {
   realName?: string
   roleId?: number
   userId?: number
+  permissions?: string
 }
 
 export interface SessionProfile {
@@ -26,6 +27,7 @@ export interface SessionProfile {
   role: string
   roleId: number
   userId: number
+  permissions?: string
 }
 
 export interface PageResult<T> {
@@ -53,6 +55,7 @@ export interface SysUser {
   realName: string
   phone?: string
   status?: number
+  permissions?: string
   createdAt?: string
 }
 
@@ -64,6 +67,7 @@ export interface UserForm {
   realName: string
   phone?: string
   status?: number
+  permissions?: string
 }
 
 export interface DroneItem {
@@ -99,6 +103,16 @@ export interface RouteItem {
   estimateMinutes?: number
   riskLevel?: string
   enabled?: number
+}
+
+export interface RouteNodeItem {
+  nodeId?: number
+  routeId?: number
+  nodeOrder?: number
+  longitude?: number
+  latitude?: number
+  altitude?: number
+  nodeType?: string
 }
 
 export interface FlightTaskItem {

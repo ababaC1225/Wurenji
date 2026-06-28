@@ -10,3 +10,9 @@ export function login(payload: LoginPayload) {
     },
   })
 }
+
+export function logoutApi() {
+  return request<string>('/auth/logout', {
+    method: 'POST',
+  })
+}

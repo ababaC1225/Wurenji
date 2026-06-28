@@ -2,6 +2,7 @@ import request from '../utils/request'
 import type {
   OperationLogItem,
   PageResult,
+  RoleItem,
   SystemParamItem,
   SysUser,
   UserForm,
@@ -15,6 +16,19 @@ export function fetchUserPage(params: { current?: number; size?: number } = {}) 
 
   const suffix = search.toString() ? `?${search.toString()}` : ''
   return request<PageResult<SysUser>>(`/sys/user/page${suffix}`)
+}
+
+export function searchUserPage(params: {
+  username?: string
+  realName?: string
+  roleId?: number
+  status?: number
+  current?: number
+  size?: number
+} = {}) {
+  return request<PageResult<SysUser>>('/sys/user/search', {
+    query: params,
+  })
 }
 
 export function createUser(payload: UserForm) {
@@ -36,6 +50,16 @@ export function updateUserStatus(userId: number, status: number) {
     method: 'PUT',
     query: { userId, status },
   })
+}
+
+export function deleteUser(userId: number) {
+  return request<string>(`/sys/user/delete/${userId}`, {
+    method: 'DELETE',
+  })
+}
+
+export function fetchRoleList() {
+  return request<RoleItem[]>('/sys/role/list')
 }
 
 export function fetchLogPage(params: { current?: number; size?: number } = {}) {

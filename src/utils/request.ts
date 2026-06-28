@@ -1,8 +1,10 @@
 ﻿import type { ApiResponse } from '../types/api'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '/api'
+const API_TARGET_LABEL = import.meta.env.VITE_API_TARGET_LABEL ?? '10.133.10.106:8082'
 const TOKEN_KEY = 'wurenji-token'
 const PROFILE_KEY = 'wurenji-profile'
+const REQUEST_TIMEOUT_MS = 8000
 
 export class RequestError extends Error {
   code?: number
@@ -42,18 +44,28 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   }
 
   let response: Response
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
 
   try {
     response = await fetch(url.toString(), {
       ...options,
       headers,
+      signal: options.signal ?? controller.signal,
       body:
         options.body === undefined || options.body instanceof FormData
           ? options.body
           : JSON.stringify(options.body),
     })
-  } catch {
-    throw new RequestError('接口服务暂时不可用，请确认后端已启动')
+  } catch (error) {
+    const isAbort = error instanceof DOMException && error.name === 'AbortError'
+    throw new RequestError(
+      isAbort
+        ? `后端服务请求超时，请确认 ${API_TARGET_LABEL} 当前可访问；也可以先使用演示模式查看页面`
+        : `接口服务暂时不可用，请确认 ${API_TARGET_LABEL} 当前可访问`,
+    )
+  } finally {
+    window.clearTimeout(timeoutId)
   }
 
   const responseText = await response.text()
@@ -77,7 +89,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
     const gatewayMessage =
       response.status === 502 || response.status === 504
-        ? '后端服务未连通，请确认 Spring Boot 已启动在 8082 端口；也可以先使用演示模式查看页面'
+        ? `后端服务未连通，请确认 ${API_TARGET_LABEL} 当前可访问；也可以先使用演示模式查看页面`
         : undefined
 
     throw new RequestError(

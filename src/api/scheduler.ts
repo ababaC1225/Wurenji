@@ -11,6 +11,19 @@ export function fetchSchedulerOrderPage(params: { current?: number; size?: numbe
   return request<PageResult<CustomerOrderItem>>(`/scheduler/order/page${suffix}`)
 }
 
+export function searchSchedulerOrders(params: {
+  orderNo?: string
+  cargoName?: string
+  orderStatus?: string
+  priority?: string
+  current?: number
+  size?: number
+} = {}) {
+  return request<PageResult<CustomerOrderItem>>('/scheduler/order/search', {
+    query: params,
+  })
+}
+
 export function fetchRoutePage(params: { current?: number; size?: number } = {}) {
   const search = new URLSearchParams()
 
@@ -19,6 +32,20 @@ export function fetchRoutePage(params: { current?: number; size?: number } = {})
 
   const suffix = search.toString() ? `?${search.toString()}` : ''
   return request<PageResult<RouteItem>>(`/scheduler/route/page${suffix}`)
+}
+
+export function searchRoutePage(params: {
+  routeName?: string
+  startPointId?: number
+  endPointId?: number
+  riskLevel?: string
+  enabled?: number
+  current?: number
+  size?: number
+} = {}) {
+  return request<PageResult<RouteItem>>('/scheduler/route/search', {
+    query: params,
+  })
 }
 
 export function createRoute(payload: RouteItem) {
@@ -56,4 +83,17 @@ export function fetchTaskPage(params: { current?: number; size?: number } = {}) 
 
   const suffix = search.toString() ? `?${search.toString()}` : ''
   return request<PageResult<FlightTaskItem>>(`/scheduler/task/page${suffix}`)
+}
+
+export function searchTaskPage(params: {
+  orderId?: number
+  droneId?: number
+  routeId?: number
+  taskStatus?: string
+  current?: number
+  size?: number
+} = {}) {
+  return request<PageResult<FlightTaskItem>>('/scheduler/task/search', {
+    query: params,
+  })
 }

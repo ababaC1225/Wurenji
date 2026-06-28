@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watchEffect } from 'vue'
 import { useRouter } from 'vue-router'
 import { addDrone, fetchDroneList, updateDroneStatus } from '../api/drone'
 import { createOrder, generateOrderTask } from '../api/order'
@@ -67,14 +67,71 @@ const userForm = reactive<UserForm>({
   realName: '',
   phone: '',
   status: 1,
+  permissions: '',
 })
 
-const tabs: Array<{ key: TabKey; label: string }> = [
-  { key: 'overview', label: '总览' },
-  { key: 'drones', label: '无人机' },
-  { key: 'orders', label: '订单调度' },
-  { key: 'alarms', label: '告警维护' },
-  { key: 'users', label: '系统用户' },
+const allPermissions = [
+  'user:query',
+  'user:add',
+  'user:update',
+  'user:delete',
+  'role:query',
+  'drone:query',
+  'drone:add',
+  'drone:update',
+  'drone:delete',
+  'order:query',
+  'order:add',
+  'order:update',
+  'order:delete',
+  'route:query',
+  'route:add',
+  'route:update',
+  'route:delete',
+  'task:query',
+  'task:add',
+  'task:update',
+  'task:delete',
+  'alarm:query',
+  'alarm:handle',
+  'maintenance:add',
+  'stat:query',
+  'log:query',
+  'param:query',
+  'param:update',
+]
+
+const dispatcherPermissions = [
+  'order:query',
+  'order:add',
+  'order:update',
+  'order:delete',
+  'route:query',
+  'route:add',
+  'route:update',
+  'route:delete',
+  'task:query',
+  'task:add',
+  'task:update',
+  'task:delete',
+]
+
+const operationsPermissions = [
+  'drone:query',
+  'drone:add',
+  'drone:update',
+  'drone:delete',
+  'alarm:query',
+  'alarm:handle',
+  'maintenance:add',
+]
+
+const tabs: Array<{ key: TabKey; label: string; permission: string }> = [
+  { key: 'overview', label: '总览', permission: 'stat:query' },
+  { key: 'drones', label: '无人机', permission: 'drone:query' },
+  { key: 'orders', label: '订单调度', permission: 'order:query' },
+  { key: 'alarms', label: '告警维护', permission: 'alarm:query' },
+  { key: 'users', label: '系统用户', permission: 'user:query' },
 ]
 
 const roleOptions = [
@@ -107,6 +164,15 @@ const demoTasks: TaskMonitorItem[] = [
   { taskId: 1, orderNo: 'ORD-20260627-001', droneCode: 'UAV-002', routeName: '总部到南区航线', taskStatus: '执行中', plannedStartTime: '2026-06-27T10:30:00' },
   { taskId: 2, orderNo: 'ORD-20260627-002', droneCode: 'UAV-001', routeName: '总部到东区航线', taskStatus: '待起飞', plannedStartTime: '2026-06-27T11:00:00' },
 ]
+
+function nextId(items: Array<{ [key: string]: unknown }>, key: string) {
+  return items.reduce((max, item) => Math.max(max, Number(item[key]) || 0), 0) + 1
+}
+
+function useMockData(message?: string) {
+  fallbackMode.value = true
+  if (message) showSuccess(message)
+}
 
 function applyDemoOverview() {
   taskMonitor.value = demoTasks.map((item) => ({ ...item }))
@@ -151,6 +217,25 @@ function updateLocalDroneStatus(droneId: number, status: string) {
   )
 }
 
+function upsertDroneHealth(item: DroneItem) {
+  if (!item.droneId) return
+
+  const healthItem = {
+    droneId: item.droneId,
+    droneCode: item.droneCode,
+    model: item.model,
+    status: item.status ?? '空闲',
+    healthScore: item.healthScore ?? 100,
+  }
+  const existingIndex = droneHealth.value.findIndex((health) => health.droneId === item.droneId)
+
+  if (existingIndex >= 0) {
+    droneHealth.value.splice(existingIndex, 1, healthItem)
+  } else {
+    droneHealth.value.unshift(healthItem)
+  }
+}
+
 const metrics = computed(() => [
   { label: '无人机总数', value: String(drones.value.length), hint: `${availableDroneCount.value} 架可调度` },
   { label: '任务数量', value: String(taskMonitor.value.length), hint: '当前任务监控记录' },
@@ -164,6 +249,38 @@ const availableDroneCount = computed(
 const pendingAlarmCount = computed(
   () => alarms.value.filter((item) => item.alarmStatus !== '已处理').length,
 )
+const dataModeLabel = computed(() =>
+  auth.token.startsWith('demo-') || fallbackMode.value ? 'MOCK: 本地数据' : 'API: 10.133.10.106:8082',
+)
+const permissionSet = computed(() => {
+  const raw = auth.profile?.permissions
+
+  if (raw === '*' || auth.profile?.role === 'demo' || auth.profile?.role === 'admin' || auth.profile?.roleId === 1) {
+    return new Set(allPermissions)
+  }
+
+  if (raw?.trim()) {
+    return new Set(raw.split(',').map((item) => item.trim()).filter(Boolean))
+  }
+
+  if (auth.profile?.roleId === 2) return new Set(dispatcherPermissions)
+  if (auth.profile?.roleId === 3) return new Set(operationsPermissions)
+
+  return new Set<string>()
+})
+const visibleTabs = computed(() => tabs.filter((tab) => can(tab.permission)))
+
+function can(permission: string) {
+  return permissionSet.value.has(permission)
+}
+
+watchEffect(() => {
+  const firstTab = visibleTabs.value[0]
+  if (!firstTab) return
+  if (!visibleTabs.value.some((tab) => tab.key === activeTab.value)) {
+    activeTab.value = firstTab.key
+  }
+})
 
 function showSuccess(message: string) {
   actionMessage.value = message
@@ -195,75 +312,153 @@ function formatDate(value?: string) {
 async function loadOverview() {
   if (auth.token.startsWith('demo-') || fallbackMode.value) {
     applyDemoOverview()
-    showSuccess('已刷新演示任务数据')
+    useMockData('已刷新 mock 任务数据')
     return
   }
 
-  try {
-    const [tasks, health, fulfillment] = await Promise.all([
-      fetchTaskMonitor(),
-      fetchDroneHealth(),
-      fetchOrderFulfill(),
-    ])
+  const [tasksResult, healthResult, fulfillmentResult] = await Promise.allSettled([
+    fetchTaskMonitor(),
+    fetchDroneHealth(),
+    fetchOrderFulfill(),
+  ])
 
+  let hasError = false
+
+  if (tasksResult.status === 'fulfilled') {
     fallbackMode.value = false
-    taskMonitor.value = tasks
-    droneHealth.value = health
+    taskMonitor.value = tasksResult.value
+  } else {
+    hasError = true
+    if (!taskMonitor.value.length) applyDemoOverview()
+  }
+
+  if (healthResult.status === 'fulfilled') {
+    fallbackMode.value = false
+    droneHealth.value = healthResult.value
+  } else {
+    hasError = true
+    if (!droneHealth.value.length) applyDemoOverview()
+  }
+
+  if (fulfillmentResult.status === 'fulfilled') {
+    fallbackMode.value = false
+    const fulfillment = fulfillmentResult.value
     if (Array.isArray(fulfillment) && fulfillment.length > 0 && !orderTotal.value) {
       orderTotal.value = fulfillment.length
     }
-  } catch (error) {
-    if (!taskMonitor.value.length) applyDemoOverview()
-    fallbackMode.value = true
-    showError(error, '任务监控同步失败，已保留当前数据')
+  } else {
+    hasError = true
+  }
+
+  if (hasError) {
+    if (!taskMonitor.value.length || !droneHealth.value.length) applyDemoOverview()
+    useMockData('部分统计接口不可用，已用 mock 数据补齐')
   }
 }
 
 async function loadDrones() {
-  drones.value = await fetchDroneList()
+  if (auth.token.startsWith('demo-') || fallbackMode.value) {
+    if (!drones.value.length) drones.value = demoDrones.map((item) => ({ ...item }))
+    return
+  }
+
+  try {
+    drones.value = await fetchDroneList()
+  } catch {
+    drones.value = demoDrones.map((item) => ({ ...item }))
+    useMockData('无人机接口不可用，已使用 mock 数据')
+  }
 }
 
 async function loadOrders() {
-  const page = await fetchSchedulerOrderPage(orderPage)
-  orders.value = pageItems<CustomerOrderItem>(page)
-  orderTotal.value = page.total
+  if (auth.token.startsWith('demo-') || fallbackMode.value) {
+    if (!orders.value.length) orders.value = demoOrders.map((item) => ({ ...item }))
+    orderTotal.value = orders.value.length
+    return
+  }
+
+  try {
+    const page = await fetchSchedulerOrderPage(orderPage)
+    orders.value = pageItems<CustomerOrderItem>(page)
+    orderTotal.value = page.total
+  } catch {
+    orders.value = demoOrders.map((item) => ({ ...item }))
+    orderTotal.value = orders.value.length
+    useMockData('订单接口不可用，已使用 mock 数据')
+  }
 }
 
 async function loadAlarms() {
-  const page = await fetchAlarmPage(alarmPage)
-  alarms.value = pageItems<AlarmEventItem>(page)
-  alarmTotal.value = page.total
+  if (auth.token.startsWith('demo-') || fallbackMode.value) {
+    if (!alarms.value.length) alarms.value = demoAlarms.map((item) => ({ ...item }))
+    alarmTotal.value = alarms.value.length
+    return
+  }
+
+  try {
+    const page = await fetchAlarmPage(alarmPage)
+    alarms.value = pageItems<AlarmEventItem>(page)
+    alarmTotal.value = page.total
+  } catch {
+    alarms.value = demoAlarms.map((item) => ({ ...item }))
+    alarmTotal.value = alarms.value.length
+    useMockData('告警接口不可用，已使用 mock 数据')
+  }
 }
 
 async function loadUsers() {
-  const page = await fetchUserPage(userPage)
-  users.value = pageItems<SysUser>(page)
-  userTotal.value = page.total
+  if (auth.token.startsWith('demo-') || fallbackMode.value) {
+    if (!users.value.length) users.value = demoUsers.map((item) => ({ ...item }))
+    userTotal.value = users.value.length
+    return
+  }
+
+  try {
+    const page = await fetchUserPage(userPage)
+    users.value = pageItems<SysUser>(page)
+    userTotal.value = page.total
+  } catch {
+    users.value = demoUsers.map((item) => ({ ...item }))
+    userTotal.value = users.value.length
+    useMockData('用户接口不可用，已使用 mock 数据')
+  }
 }
 
 async function loadAll() {
   loading.value = true
   actionError.value = ''
 
-  try {
-    await Promise.all([loadOverview(), loadDrones(), loadOrders(), loadAlarms(), loadUsers()])
-    fallbackMode.value = false
-  } catch (error) {
-    applyDemoData()
-    showError(error, '后端未连通，已切换为演示数据')
-  } finally {
-    loading.value = false
-  }
+  await Promise.allSettled([loadOverview(), loadDrones(), loadOrders(), loadAlarms(), loadUsers()])
+  loading.value = false
 }
 
 async function submitDrone() {
+  const draft = { ...droneForm }
+  const fallbackDrone: DroneItem = {
+    ...draft,
+    droneId: nextId(drones.value, 'droneId'),
+    status: '空闲',
+    healthScore: 100,
+  }
+
   try {
-    await addDrone({ ...droneForm })
+    const created = await addDrone(draft)
+    const item = {
+      ...fallbackDrone,
+      ...created,
+      droneId: created?.droneId ?? fallbackDrone.droneId,
+      status: created?.status ?? fallbackDrone.status,
+      healthScore: created?.healthScore ?? fallbackDrone.healthScore,
+    }
+    drones.value.unshift(item)
+    upsertDroneHealth(item)
     Object.assign(droneForm, { droneCode: '', model: 'DJI M300', parkId: 1, maxPayload: 5, batteryCapacity: 100 })
-    await loadDrones()
     showSuccess('无人机已新增')
-  } catch (error) {
-    showError(error, '无人机新增失败')
+  } catch {
+    drones.value.unshift(fallbackDrone)
+    upsertDroneHealth(fallbackDrone)
+    Object.assign(droneForm, { droneCode: '', model: 'DJI M300', parkId: 1, maxPayload: 5, batteryCapacity: 100 })
+    useMockData('无人机新增接口不可用，已临时写入 mock 数据')
   }
 }
 
@@ -288,25 +483,58 @@ async function setDroneStatus(item: DroneItem, status: string) {
 }
 
 async function submitOrder() {
+  const draft = { ...orderForm }
+  const fallbackOrder: CustomerOrderItem = {
+    ...draft,
+    orderId: nextId(orders.value, 'orderId'),
+    orderNo: `MOCK-${Date.now()}`,
+    orderStatus: '待审核',
+    createdAt: new Date().toISOString(),
+  }
+
   try {
-    await createOrder({ ...orderForm })
+    const created = await createOrder(draft)
+    orders.value.unshift({
+      ...fallbackOrder,
+      ...created,
+      orderId: created?.orderId ?? fallbackOrder.orderId,
+      orderNo: created?.orderNo ?? fallbackOrder.orderNo,
+      orderStatus: created?.orderStatus ?? fallbackOrder.orderStatus,
+      createdAt: created?.createdAt ?? fallbackOrder.createdAt,
+    })
+    orderTotal.value = Math.max(orderTotal.value + 1, orders.value.length)
     Object.assign(orderForm, { pickupPointId: 1, deliveryPointId: 3, cargoName: '', cargoWeight: 2.5, priority: '普通' })
-    await loadOrders()
     showSuccess('订单已创建')
-  } catch (error) {
-    showError(error, '订单创建失败')
+  } catch {
+    orders.value.unshift(fallbackOrder)
+    orderTotal.value = orders.value.length
+    Object.assign(orderForm, { pickupPointId: 1, deliveryPointId: 3, cargoName: '', cargoWeight: 2.5, priority: '普通' })
+    useMockData('订单创建接口不可用，已临时写入 mock 数据')
   }
 }
 
 async function generateTask(order: CustomerOrderItem) {
   if (!order.orderId) return
 
+  const taskId = nextId(taskMonitor.value, 'taskId')
+  const task: TaskMonitorItem = {
+    taskId,
+    orderNo: order.orderNo,
+    droneCode: drones.value.find((item) => item.status === '空闲')?.droneCode ?? 'UAV-MOCK',
+    routeName: '调度航线',
+    taskStatus: '待起飞',
+    plannedStartTime: new Date().toISOString(),
+  }
+
   try {
     const message = await generateOrderTask(order.orderId)
-    await Promise.all([loadOrders(), loadOverview()])
+    order.orderStatus = '执行中'
+    taskMonitor.value.unshift(task)
     showSuccess(message || '配送任务已生成')
-  } catch (error) {
-    showError(error, '任务生成失败')
+  } catch {
+    order.orderStatus = '执行中'
+    taskMonitor.value.unshift({ ...task, routeName: 'mock 调度航线' })
+    useMockData('任务生成接口不可用，已临时生成 mock 任务')
   }
 }
 
@@ -322,14 +550,18 @@ async function resolveAlarm(item: AlarmEventItem) {
     })
     await loadAlarms()
     showSuccess('告警已处理')
-  } catch (error) {
-    showError(error, '告警处理失败')
+  } catch {
+    item.alarmStatus = '已处理'
+    item.handlerId = auth.profile?.userId || undefined
+    item.handleResult = item.handleResult || 'mock 标记处理'
+    alarmTotal.value = alarms.value.length
+    useMockData('告警处理接口不可用，已临时更新 mock 状态')
   }
 }
 
 function resetUserForm() {
   editingUserId.value = null
-  Object.assign(userForm, { roleId: 1, username: '', passwordHash: '', realName: '', phone: '', status: 1 })
+  Object.assign(userForm, { roleId: 1, username: '', passwordHash: '', realName: '', phone: '', status: 1, permissions: '' })
 }
 
 function editUser(item: SysUser) {
@@ -341,6 +573,7 @@ function editUser(item: SysUser) {
     realName: item.realName,
     phone: item.phone ?? '',
     status: item.status ?? 1,
+    permissions: item.permissions ?? '',
   })
 }
 
@@ -356,8 +589,18 @@ async function submitUser() {
 
     resetUserForm()
     await loadUsers()
-  } catch (error) {
-    showError(error, '用户保存失败')
+  } catch {
+    if (editingUserId.value) {
+      users.value = users.value.map((item) =>
+        item.userId === editingUserId.value ? { ...item, ...userForm, userId: editingUserId.value } : item,
+      )
+      useMockData('用户更新接口不可用，已临时更新 mock 数据')
+    } else {
+      users.value.unshift({ ...userForm, userId: nextId(users.value, 'userId') })
+      userTotal.value = users.value.length
+      useMockData('用户新增接口不可用，已临时写入 mock 数据')
+    }
+    resetUserForm()
   }
 }
 
@@ -366,8 +609,9 @@ async function toggleUserStatus(item: SysUser) {
     await updateUserStatus(item.userId, item.status === 0 ? 1 : 0)
     await loadUsers()
     showSuccess('用户状态已更新')
-  } catch (error) {
-    showError(error, '用户状态更新失败')
+  } catch {
+    item.status = item.status === 0 ? 1 : 0
+    useMockData('用户状态接口不可用，已临时更新 mock 状态')
   }
 }
 
@@ -392,7 +636,7 @@ onMounted(loadAll)
 
       <nav class="nav-list">
         <button
-          v-for="tab in tabs"
+          v-for="tab in visibleTabs"
           :key="tab.key"
           :class="['nav-item', { active: activeTab === tab.key }]"
           type="button"
@@ -420,7 +664,7 @@ onMounted(loadAll)
         </div>
         <div class="status-area">
           <span v-if="loading">正在同步...</span>
-          <span v-else>API: localhost:8082</span>
+          <span v-else>{{ dataModeLabel }}</span>
         </div>
       </header>
 
@@ -463,7 +707,7 @@ onMounted(loadAll)
       </section>
 
       <section v-else-if="activeTab === 'drones'" class="split-layout">
-        <section class="card form-panel">
+        <section v-if="can('drone:add')" class="card form-panel">
           <div class="section-title"><h2>新增无人机</h2></div>
           <form class="field-grid" @submit.prevent="submitDrone">
             <label><span>编号</span><input v-model="droneForm.droneCode" required placeholder="UAV-005" /></label>
@@ -481,19 +725,20 @@ onMounted(loadAll)
             <div class="table-row table-head"><span>编号</span><span>型号</span><span>载重</span><span>电量</span><span>健康</span><span>状态</span><span>操作</span></div>
             <div v-for="item in drones" :key="item.droneId" class="table-row">
               <span>{{ item.droneCode }}</span><span>{{ item.model ?? '-' }}</span><span>{{ item.maxPayload ?? '-' }}</span><span>{{ item.batteryCapacity ?? '-' }}</span><span>{{ item.healthScore ?? '-' }}</span><span>{{ item.status ?? '空闲' }}</span>
-              <span class="row-actions">
+              <span v-if="can('drone:update')" class="row-actions">
                 <button class="text-btn" @click="setDroneStatus(item, '空闲')">空闲</button>
                 <button class="text-btn" @click="setDroneStatus(item, '任务中')">任务中</button>
                 <button class="text-btn" @click="setDroneStatus(item, '维护中')">维护中</button>
                 <button class="text-btn danger" @click="setDroneStatus(item, '停用')">停用</button>
               </span>
+              <span v-else>-</span>
             </div>
           </div>
         </section>
       </section>
 
       <section v-else-if="activeTab === 'orders'" class="split-layout">
-        <section class="card form-panel">
+        <section v-if="can('order:add')" class="card form-panel">
           <div class="section-title"><h2>创建订单</h2></div>
           <form class="field-grid" @submit.prevent="submitOrder">
             <label><span>货物名称</span><input v-model="orderForm.cargoName" required placeholder="医疗物资" /></label>
@@ -510,7 +755,7 @@ onMounted(loadAll)
           <div class="table order-table">
             <div class="table-row table-head"><span>订单号</span><span>货物</span><span>重量</span><span>优先级</span><span>状态</span><span>创建时间</span><span>操作</span></div>
             <div v-for="item in orders" :key="item.orderId" class="table-row">
-              <span>{{ item.orderNo ?? item.orderId }}</span><span>{{ item.cargoName ?? '-' }}</span><span>{{ item.cargoWeight ?? '-' }}</span><span>{{ item.priority ?? '-' }}</span><span>{{ item.orderStatus ?? '-' }}</span><span>{{ formatDate(item.createdAt) }}</span><span><button class="text-btn" @click="generateTask(item)">生成任务</button></span>
+              <span>{{ item.orderNo ?? item.orderId }}</span><span>{{ item.cargoName ?? '-' }}</span><span>{{ item.cargoWeight ?? '-' }}</span><span>{{ item.priority ?? '-' }}</span><span>{{ item.orderStatus ?? '-' }}</span><span>{{ formatDate(item.createdAt) }}</span><span><button v-if="can('task:add')" class="text-btn" @click="generateTask(item)">生成任务</button><span v-else>-</span></span>
             </div>
           </div>
         </section>
@@ -521,13 +766,13 @@ onMounted(loadAll)
         <div class="table alarm-table">
           <div class="table-row table-head"><span>ID</span><span>无人机</span><span>类型</span><span>等级</span><span>状态</span><span>时间</span><span>处理结果</span><span>操作</span></div>
           <div v-for="item in alarms" :key="item.alarmId" class="table-row">
-            <span>{{ item.alarmId }}</span><span>{{ item.droneId ?? '-' }}</span><span>{{ item.alarmType ?? '-' }}</span><span>{{ item.alarmLevel ?? '-' }}</span><span>{{ item.alarmStatus ?? '-' }}</span><span>{{ formatDate(item.alarmTime) }}</span><span>{{ item.handleResult ?? '-' }}</span><span><button class="text-btn" @click="resolveAlarm(item)">标记处理</button></span>
+            <span>{{ item.alarmId }}</span><span>{{ item.droneId ?? '-' }}</span><span>{{ item.alarmType ?? '-' }}</span><span>{{ item.alarmLevel ?? '-' }}</span><span>{{ item.alarmStatus ?? '-' }}</span><span>{{ formatDate(item.alarmTime) }}</span><span>{{ item.handleResult ?? '-' }}</span><span><button v-if="can('alarm:handle')" class="text-btn" @click="resolveAlarm(item)">标记处理</button><span v-else>-</span></span>
           </div>
         </div>
       </section>
 
       <section v-else class="split-layout">
-        <section class="card form-panel">
+        <section v-if="can('user:add') || can('user:update')" class="card form-panel">
           <div class="section-title"><h2>{{ editingUserId ? '编辑用户' : '新增用户' }}</h2></div>
           <form class="field-grid" @submit.prevent="submitUser">
             <label><span>用户名</span><input v-model="userForm.username" required /></label>
@@ -536,6 +781,7 @@ onMounted(loadAll)
             <label><span>手机</span><input v-model="userForm.phone" /></label>
             <label><span>角色</span><select v-model.number="userForm.roleId"><option v-for="role in roleOptions" :key="role.roleId" :value="role.roleId">{{ role.roleName }}</option></select></label>
             <label><span>状态</span><select v-model.number="userForm.status"><option :value="1">正常</option><option :value="0">停用</option></select></label>
+            <label class="full-width"><span>权限代码</span><input v-model="userForm.permissions" placeholder="user:query,drone:query,order:add" /></label>
             <div class="button-row"><button class="outline-btn" type="button" @click="resetUserForm">清空</button><button class="primary-btn" type="submit">保存用户</button></div>
           </form>
         </section>
@@ -545,7 +791,7 @@ onMounted(loadAll)
           <div class="table user-table">
             <div class="table-row table-head"><span>ID</span><span>用户名</span><span>姓名</span><span>角色</span><span>状态</span><span>操作</span></div>
             <div v-for="item in users" :key="item.userId" class="table-row">
-              <span>{{ item.userId }}</span><span>{{ item.username }}</span><span>{{ item.realName }}</span><span>{{ roleNameOf(item.roleId) }}</span><span>{{ statusText(item.status) }}</span><span class="row-actions"><button class="text-btn" @click="editUser(item)">编辑</button><button class="text-btn" @click="toggleUserStatus(item)">{{ item.status === 0 ? '启用' : '停用' }}</button></span>
+              <span>{{ item.userId }}</span><span>{{ item.username }}</span><span>{{ item.realName }}</span><span>{{ roleNameOf(item.roleId) }}</span><span>{{ statusText(item.status) }}</span><span class="row-actions"><button v-if="can('user:update')" class="text-btn" @click="editUser(item)">编辑</button><button v-if="can('user:update')" class="text-btn" @click="toggleUserStatus(item)">{{ item.status === 0 ? '启用' : '停用' }}</button><span v-if="!can('user:update')">-</span></span>
             </div>
           </div>
         </section>
@@ -558,20 +804,21 @@ onMounted(loadAll)
 .platform-shell {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 248px minmax(0, 1fr);
+  grid-template-columns: 240px minmax(0, 1fr);
   gap: 18px;
   width: 100%;
   margin: 0;
   padding: 18px;
-  background: #e8ecef;
+  background: #f5f7fb;
   font-size: 16px;
 }
 
 .sidebar,
 .card {
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  border-radius: 18px;
-  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.08);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 16px 38px rgba(15, 23, 42, 0.06);
 }
 
 .sidebar {
@@ -582,12 +829,7 @@ onMounted(loadAll)
   flex-direction: column;
   gap: 18px;
   padding: 20px 16px;
-  background: #111315;
-  color: #f8fafc;
-}
-
-.card {
-  background: #fffdf8;
+  color: #1f2937;
 }
 
 .brand {
@@ -595,7 +837,7 @@ onMounted(loadAll)
   align-items: center;
   gap: 12px;
   padding: 0 4px 18px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
 }
 
 .brand > span {
@@ -604,11 +846,10 @@ onMounted(loadAll)
   display: grid;
   place-items: center;
   flex: none;
-  border-radius: 14px;
-  background: #f6d74b;
-  color: #111315;
+  border-radius: 10px;
+  background: #0f766e;
+  color: #ffffff;
   font-weight: 850;
-  font-size: 0.92rem;
 }
 
 .brand strong,
@@ -618,26 +859,8 @@ onMounted(loadAll)
   font-weight: 800;
 }
 
-.brand strong {
-  font-size: 1.02rem;
-}
-
-.brand p,
-.user-panel p,
-.metric p,
-.metric span,
-.status-area,
-.empty-state,
-.field-grid span,
-.eyebrow {
-  color: #6b7280;
-}
-
-.sidebar .brand p,
-.sidebar .user-panel p,
-.sidebar .user-panel span {
-  color: rgba(248, 250, 252, 0.62);
-}
+.brand strong { font-size: 1rem; color: #1f2937; }
+.brand p { color: #64748b; }
 
 .nav-list {
   display: grid;
@@ -650,51 +873,49 @@ onMounted(loadAll)
 .text-btn,
 input,
 select {
-  border-radius: 12px;
+  border-radius: 8px;
   font: inherit;
 }
 
 .nav-item {
   width: 100%;
   border: 1px solid transparent;
-  padding: 12px 14px;
+  padding: 11px 12px;
   background: transparent;
-  color: rgba(248, 250, 252, 0.72);
+  color: #64748b;
   cursor: pointer;
   text-align: left;
 }
 
 .nav-item:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #ffffff;
+  background: rgba(15, 118, 110, 0.06);
+  color: #1f2937;
 }
 
 .nav-item.active {
-  border-color: rgba(246, 215, 75, 0.35);
-  background: #f6d74b;
-  color: #111315;
+  border-color: rgba(15, 118, 110, 0.22);
+  background: rgba(15, 118, 110, 0.1);
+  color: #0f766e;
   font-weight: 800;
 }
 
 .user-panel {
   margin-top: auto;
   padding: 14px;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(15, 118, 110, 0.08);
 }
 
-.user-panel strong {
-  display: block;
-  margin-top: 4px;
-  font-weight: 750;
-  color: #ffffff;
-}
+.user-panel span,
+.user-panel p { color: #64748b; }
+.user-panel strong { display: block; margin-top: 4px; color: #1f2937; font-weight: 800; }
 
 .sidebar > .outline-btn {
   width: 100%;
-  border-color: rgba(255, 255, 255, 0.14);
-  background: rgba(255, 255, 255, 0.08);
-  color: #ffffff;
+  min-height: 42px;
+  border-color: rgba(148, 163, 184, 0.24);
+  background: #ffffff;
+  color: #1f2937;
 }
 
 .content {
@@ -714,10 +935,7 @@ select {
   gap: 14px;
 }
 
-.page-head {
-  padding: 26px 30px;
-  background: #fffdf8;
-}
+.page-head { padding: 24px 26px; }
 
 .eyebrow {
   font-size: 0.82rem;
@@ -728,33 +946,29 @@ select {
 
 .page-head h1 {
   margin-top: 4px;
-  font-size: clamp(2rem, 2.6vw, 2.8rem);
-  line-height: 1.08;
+  font-size: clamp(1.8rem, 2.5vw, 2.5rem);
+  line-height: 1.1;
+  color: #1f2937;
 }
 
 .status-area {
+  align-self: flex-start;
+  padding: 9px 14px;
+  border-radius: 999px;
+  background: rgba(15, 118, 110, 0.08);
+  color: #0f766e;
   font-size: 0.94rem;
   white-space: nowrap;
 }
 
 .notice {
   padding: 12px 16px;
-  border-radius: 14px;
+  border-radius: 8px;
   border: 1px solid transparent;
   font-size: 0.95rem;
 }
-
-.notice.success {
-  color: #0f5132;
-  background: #d1e7dd;
-  border-color: #badbcc;
-}
-
-.notice.error {
-  color: #842029;
-  background: #f8d7da;
-  border-color: #f5c2c7;
-}
+.notice.success { color: #0f5132; background: #d1e7dd; border-color: #badbcc; }
+.notice.error { color: #842029; background: #f8d7da; border-color: #f5c2c7; }
 
 .overview-grid {
   display: grid;
@@ -767,72 +981,28 @@ select {
   display: grid;
   gap: 10px;
   padding: 24px;
-  min-height: 158px;
-  border: 0;
-  box-shadow: none;
+  min-height: 150px;
+  background: rgba(255, 255, 255, 0.92);
 }
-
-.metric:nth-child(1) {
-  background: #f6d74b;
-}
-
-.metric:nth-child(2) {
-  background: #ffc1dc;
-}
-
-.metric:nth-child(3) {
-  background: #cddc8d;
-}
-
-.metric:nth-child(4) {
-  background: #1f2937;
-}
-
-.metric:nth-child(4),
-.metric:nth-child(4) span,
-.metric:nth-child(4) p,
-.metric:nth-child(4) strong {
-  color: #ffffff;
-}
-
-.metric span {
-  font-size: 0.94rem;
-  color: rgba(17, 19, 21, 0.72);
-}
-
-.metric strong {
-  color: #111315;
-  font-size: 2.75rem;
-  line-height: 1;
-}
-
-.metric p {
-  color: rgba(17, 19, 21, 0.68);
-}
+.metric:nth-child(1) { background: rgba(15, 118, 110, 0.08); }
+.metric:nth-child(2) { background: rgba(37, 99, 235, 0.08); }
+.metric:nth-child(3) { background: rgba(180, 83, 9, 0.08); }
+.metric:nth-child(4) { background: rgba(190, 18, 60, 0.08); }
+.metric span { font-size: 0.94rem; color: #64748b; }
+.metric strong { color: #0f766e; font-size: 2.6rem; line-height: 1; font-weight: 850; }
+.metric p { color: #64748b; }
 
 .wide-panel,
 .table-panel,
 .side-panel,
-.form-panel {
-  padding: 28px;
-}
-
-.wide-panel {
-  grid-column: span 8;
-}
-
-.side-panel {
-  grid-column: span 4;
-}
-
+.form-panel { padding: 26px; }
+.wide-panel { grid-column: span 8; }
+.side-panel { grid-column: span 4; }
 .table-panel,
-.form-panel {
-  grid-column: 1 / -1;
-}
+.form-panel,
+.full-width { grid-column: 1 / -1; }
 
-.section-title h2 {
-  font-size: 1.32rem;
-}
+.section-title h2 { font-size: 1.28rem; color: #1f2937; }
 
 .split-layout {
   display: grid;
@@ -840,282 +1010,113 @@ select {
   gap: 18px;
   align-items: start;
 }
-
 .split-layout > .form-panel,
-.split-layout > .table-panel {
-  width: 100%;
-}
+.split-layout > .table-panel { width: 100%; }
 
 .field-grid,
-.health-list {
-  display: grid;
-  gap: 18px;
-}
-
-.form-panel .field-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  align-items: end;
-}
-
+.health-list { display: grid; gap: 18px; }
+.form-panel .field-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: end; }
 .form-panel .field-grid .primary-btn,
-.form-panel .field-grid .button-row {
-  align-self: end;
-}
-
-.form-panel .field-grid > .primary-btn {
-  width: 100%;
-  min-height: 50px;
-}
-
-.full-width {
-  grid-column: 1 / -1;
-}
-
-.field-grid label {
-  display: grid;
-  gap: 10px;
-}
+.form-panel .field-grid .button-row { align-self: end; }
+.form-panel .field-grid > .primary-btn { width: 100%; min-height: 50px; }
+.field-grid label { display: grid; gap: 10px; }
+.field-grid span,
+.empty-state,
+.health-item span { color: #64748b; }
 
 input,
 select {
   width: 100%;
-  border: 1px solid rgba(15, 23, 42, 0.12);
+  border: 1px solid rgba(148, 163, 184, 0.24);
   padding: 13px 14px;
   min-height: 50px;
   background: #ffffff;
   outline: none;
   font-size: 1rem;
 }
-
 input:focus,
-select:focus {
-  border-color: rgba(15, 118, 110, 0.45);
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.08);
-}
+select:focus { border-color: rgba(15, 118, 110, 0.55); box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12); }
 
 .primary-btn,
 .outline-btn,
 .text-btn {
-  border: 1px solid rgba(15, 23, 42, 0.12);
+  border: 1px solid rgba(148, 163, 184, 0.24);
   padding: 11px 14px;
   min-height: 44px;
   cursor: pointer;
   font-weight: 750;
 }
-
-.primary-btn {
-  border-color: #0f766e;
-  background: #0f766e;
-  color: #fff;
-}
-
+.primary-btn { border-color: #0f766e; background: #0f766e; color: #ffffff; }
 .outline-btn,
-.text-btn {
-  background: #ffffff;
-  color: #111315;
-}
-
-.text-btn.danger {
-  color: #b42318;
-}
+.text-btn { background: #ffffff; color: #1f2937; }
+.text-btn.danger { color: #b42318; }
 
 .table,
-.compact-table {
-  display: grid;
-  gap: 12px;
-  margin-top: 16px;
-  overflow-x: auto;
-}
-
+.compact-table { display: grid; gap: 12px; margin-top: 16px; overflow-x: auto; }
 .table-row {
   min-width: 780px;
   display: grid;
   gap: 14px;
   align-items: center;
   padding: 16px 14px;
-  border-radius: 14px;
-  background: #f6f7f4;
+  border-radius: 10px;
+  background: rgba(248, 250, 252, 0.86);
   line-height: 1.35;
 }
-
-.table-head {
-  background: transparent;
-  color: #6b7280;
-  font-weight: 800;
-}
-
-.compact-table .table-row {
-  grid-template-columns: 80px 1.2fr 1fr 1fr 1.2fr;
-}
-
+.table-head { background: transparent; color: #64748b; font-weight: 800; }
+.compact-table .table-row { grid-template-columns: 80px 1.2fr 1fr 1fr 1.2fr; }
 .drone-table .table-row,
-.order-table .table-row {
-  grid-template-columns: 1.1fr 1fr 0.7fr 0.7fr 0.7fr 0.9fr 1.3fr;
-}
+.order-table .table-row { grid-template-columns: 1.1fr 1fr 0.7fr 0.7fr 0.7fr 0.9fr 1.3fr; }
+.alarm-table .table-row { grid-template-columns: 70px 90px 1fr 0.8fr 0.9fr 1.2fr 1.4fr 1fr; }
+.user-table .table-row { grid-template-columns: 70px 1fr 1fr 0.9fr 0.8fr 1.4fr; }
 
-.alarm-table .table-row {
-  grid-template-columns: 70px 90px 1fr 0.8fr 0.9fr 1.2fr 1.4fr 1fr;
-}
-
-.user-table .table-row {
-  grid-template-columns: 70px 1fr 1fr 0.9fr 0.8fr 1.4fr;
-}
-
-.health-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 18px 0;
-  border-top: 1px solid rgba(15, 23, 42, 0.08);
-}
-
-.health-item:first-child {
-  border-top: 0;
-}
-
-.health-item div {
-  display: grid;
-  gap: 2px;
-}
-
-.health-item strong {
-  font-weight: 800;
-}
-
-.health-item b {
-  color: #0f766e;
-  font-size: 1.6rem;
-}
-
-.empty-state {
-  padding: 20px 0;
-}
+.health-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 0; border-top: 1px solid rgba(148, 163, 184, 0.22); }
+.health-item:first-child { border-top: 0; }
+.health-item div { display: grid; gap: 2px; }
+.health-item strong { font-weight: 800; color: #1f2937; }
+.health-item b { font-size: 1.6rem; color: #0f766e; }
 
 @media (max-width: 1100px) {
-  .platform-shell {
-    grid-template-columns: 1fr;
-  }
-
-  .sidebar {
-    position: static;
-    height: auto;
-    display: grid;
-    grid-template-columns: 1fr;
-  }
-
-  .brand {
-    padding-bottom: 12px;
-  }
-
-  .nav-list {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .nav-item,
-  .sidebar > .outline-btn {
-    text-align: center;
-  }
-
-  .user-panel {
-    margin-top: 0;
-  }
-
-  .metric {
-    grid-column: span 6;
-  }
-
+  .platform-shell { grid-template-columns: 1fr; }
+  .sidebar { position: static; height: auto; }
+  .nav-list { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .metric { grid-column: span 6; }
   .wide-panel,
-  .side-panel {
-    grid-column: span 12;
-  }
-
-  .form-panel .field-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+  .side-panel { grid-column: span 12; }
+  .form-panel .field-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 720px) {
-  .platform-shell {
-    width: 100%;
-    padding: 12px;
-    gap: 14px;
-    font-size: 15px;
-  }
-
+  .platform-shell { width: 100%; padding: 12px; gap: 14px; font-size: 15px; }
   .sidebar,
-  .card {
-    border-radius: 16px;
-  }
-
+  .card { border-radius: 10px; }
   .sidebar,
   .page-head,
   .wide-panel,
   .table-panel,
   .side-panel,
-  .form-panel {
-    padding: 18px;
-  }
-
-  .nav-list {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
+  .form-panel { padding: 18px; }
+  .nav-list { grid-template-columns: repeat(5, minmax(0, 1fr)); }
   .page-head,
   .section-title,
-  .button-row {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .status-area {
-    white-space: normal;
-  }
-
-  .overview-grid {
-    grid-template-columns: 1fr;
-  }
-
+  .button-row { align-items: stretch; flex-direction: column; }
+  .status-area { white-space: normal; }
+  .overview-grid { grid-template-columns: 1fr; }
   .metric,
   .wide-panel,
   .table-panel,
-  .side-panel {
-    grid-column: auto;
-  }
-
-  .form-panel .field-grid {
-    grid-template-columns: 1fr;
-  }
-
+  .side-panel { grid-column: auto; }
+  .form-panel .field-grid { grid-template-columns: 1fr; }
   .table,
-  .compact-table {
-    overflow-x: visible;
-  }
-
-  .table-head {
-    display: none;
-  }
-
+  .compact-table { overflow-x: visible; }
+  .table-head { display: none; }
   .table-row,
   .compact-table .table-row,
   .drone-table .table-row,
   .order-table .table-row,
   .alarm-table .table-row,
-  .user-table .table-row {
-    min-width: 0;
-    grid-template-columns: 1fr;
-    gap: 8px;
-    padding: 14px;
-  }
-
-  .table-row span {
-    min-width: 0;
-    overflow-wrap: anywhere;
-  }
-
-  .row-actions {
-    justify-content: flex-start;
-    flex-wrap: wrap;
-  }
+  .user-table .table-row { min-width: 0; grid-template-columns: 1fr; gap: 8px; padding: 14px; }
+  .table-row span { min-width: 0; overflow-wrap: anywhere; }
+  .row-actions { justify-content: flex-start; flex-wrap: wrap; }
 }
 </style>

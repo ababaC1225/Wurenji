@@ -38,6 +38,7 @@ export const useAuthStore = defineStore('auth', () => {
       role: 'demo',
       roleId: 0,
       userId: 0,
+      permissions: '*',
     })
   }
 
