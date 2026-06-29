@@ -11,6 +11,20 @@ export function login(payload: LoginPayload) {
   })
 }
 
+export function sendEmailCode(email: string) {
+  return request<void>('/auth/send-code', {
+    method: 'POST',
+    query: { email },
+  })
+}
+
+export function loginByEmail(payload: { email: string; code: string }) {
+  return request<LoginResponse>('/auth/login-email', {
+    method: 'POST',
+    query: payload,
+  })
+}
+
 export function logoutApi() {
   return request<string>('/auth/logout', {
     method: 'POST',

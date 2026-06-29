@@ -1,6 +1,12 @@
 import request from '../utils/request'
 import type { AlarmEventItem, MaintenanceRecordItem, PageResult } from '../types/api'
 
+type AlarmHandlePayload = Pick<AlarmEventItem, 'alarmId' | 'alarmStatus' | 'handlerId' | 'handleResult'>
+type AlarmEditPayload = Pick<
+  AlarmEventItem,
+  'alarmId' | 'droneId' | 'taskId' | 'alarmType' | 'alarmLevel' | 'alarmStatus' | 'handlerId' | 'handleResult'
+>
+
 export function createMaintenanceRecord(payload: MaintenanceRecordItem) {
   return request<void>('/maintain/record/add', {
     method: 'POST',
@@ -31,9 +37,27 @@ export function searchAlarmPage(params: {
   })
 }
 
-export function handleAlarm(payload: AlarmEventItem) {
+export function updateAlarmHandle(payload: AlarmHandlePayload) {
   return request<void>('/maintain/alarm/handle', {
     method: 'PUT',
+    body: payload,
+  })
+}
+
+export function handleAlarm(payload: AlarmHandlePayload) {
+  return updateAlarmHandle(payload)
+}
+
+export function editAlarmApi(payload: AlarmEditPayload) {
+  return request<void>('/maintain/alarm/edit', {
+    method: 'PUT',
+    body: payload,
+  })
+}
+
+export function generateAlarm(payload: Pick<AlarmEventItem, 'droneId' | 'taskId' | 'alarmType' | 'alarmLevel'>) {
+  return request<void>('/maintain/alarm/generate', {
+    method: 'POST',
     body: payload,
   })
 }

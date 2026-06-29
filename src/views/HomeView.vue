@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { computed, onMounted, reactive, ref, watchEffect } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watchEffect } from 'vue'
 import { useRouter } from 'vue-router'
 import { addDrone, deleteDrone, fetchDroneList, searchDrones, updateDrone, updateDroneStatus } from '../api/drone'
 import { createOrder, updateOrder } from '../api/order'
@@ -15,7 +15,7 @@ import {
   updateRoute,
 } from '../api/scheduler'
 import { addRouteNode, fetchRouteNodeList } from '../api/routeNode'
-import { createMaintenanceRecord, fetchAlarmPage, handleAlarm, searchAlarmPage } from '../api/maintenance'
+import { editAlarmApi, fetchAlarmPage, handleAlarm, searchAlarmPage } from '../api/maintenance'
 import {
   createUser,
   fetchLogPage,
@@ -51,6 +51,10 @@ type DronePanelKey = 'list' | 'form'
 type OrderPanelKey = 'orders' | 'routes' | 'tasks' | 'create'
 type AlarmPanelKey = 'list' | 'handle'
 type UserPanelKey = 'list' | 'form' | 'roles' | 'logs'
+type MetricTarget =
+  | { tab: 'drones'; panel: DronePanelKey; permission: string }
+  | { tab: 'orders'; panel: OrderPanelKey; permission: string }
+  | { tab: 'alarms'; panel: AlarmPanelKey; permission: string }
 
 const activeTab = ref<TabKey>('overview')
 const activeDronePanel = ref<DronePanelKey>('list')
@@ -58,6 +62,7 @@ const activeOrderPanel = ref<OrderPanelKey>('orders')
 const activeAlarmPanel = ref<AlarmPanelKey>('list')
 const activeUserPanel = ref<UserPanelKey>('list')
 const loading = ref(false)
+const orderSubmitting = ref(false)
 const fallbackMode = ref(false)
 const actionMessage = ref('')
 const actionError = ref('')
@@ -71,6 +76,7 @@ const users = ref<SysUser[]>([])
 const roles = ref<RoleItem[]>([])
 const logs = ref<OperationLogItem[]>([])
 const routeNodes = ref<RouteNodeItem[]>([])
+const localOrderEdits = ref(new Map<number, CustomerOrderItem>())
 const taskMonitor = ref<TaskMonitorItem[]>([])
 const droneHealth = ref<DroneHealthItem[]>([])
 const orderTotal = ref(0)
@@ -81,6 +87,14 @@ const userTotal = ref(0)
 const logTotal = ref(0)
 const droneTotal = ref(0)
 const selectedRouteId = ref<number | null>(null)
+const routeEditorOpen = ref(false)
+const routeEditorReturnY = ref(0)
+const routeEditorReturnRouteId = ref<number | null>(null)
+const routeEditorReturnTop = ref(0)
+const alarmEditorOpen = ref(false)
+const alarmEditorReturnY = ref(0)
+const alarmEditorReturnAlarmId = ref<number | null>(null)
+const alarmEditorReturnTop = ref(0)
 const editingDroneId = ref<number | null>(null)
 const editingOrderId = ref<number | null>(null)
 const editingRouteId = ref<number | null>(null)
@@ -389,11 +403,31 @@ function upsertDroneHealth(item: DroneItem) {
   }
 }
 
-const metrics = computed(() => [
-  { label: '无人机总数', value: String(drones.value.length), hint: `${availableDroneCount.value} 架可调度` },
-  { label: '任务数量', value: String(taskMonitor.value.length), hint: '当前任务监控记录' },
-  { label: '订单数量', value: String(orderTotal.value || orders.value.length), hint: '订单分页统计' },
-  { label: '待处理告警', value: String(pendingAlarmCount.value), hint: `告警总数 ${alarmTotal.value || alarms.value.length}` },
+const metrics = computed<Array<{ label: string; value: string; hint: string; target: MetricTarget }>>(() => [
+  {
+    label: '无人机总数',
+    value: String(drones.value.length),
+    hint: `${availableDroneCount.value} 架可调度`,
+    target: { tab: 'drones', panel: 'list', permission: 'drone:query' },
+  },
+  {
+    label: '任务数量',
+    value: String(taskMonitor.value.length),
+    hint: '当前任务监控记录',
+    target: { tab: 'orders', panel: 'tasks', permission: 'task:query' },
+  },
+  {
+    label: '订单数量',
+    value: String(orderTotal.value || orders.value.length),
+    hint: '订单分页统计',
+    target: { tab: 'orders', panel: 'orders', permission: 'order:query' },
+  },
+  {
+    label: '待处理告警',
+    value: String(pendingAlarmCount.value),
+    hint: `告警总数 ${alarmTotal.value || alarms.value.length}`,
+    target: { tab: 'alarms', panel: 'list', permission: 'alarm:query' },
+  },
 ])
 const overviewTaskRows = computed(() => pageSlice(taskMonitor.value, overviewTaskPage))
 
@@ -440,7 +474,6 @@ const orderPanels = computed(() =>
 const alarmPanels = computed(() =>
   [
     { key: 'list' as const, label: '告警条件查询', permission: 'alarm:query' },
-    { key: 'handle' as const, label: '告警处理信息更新', permission: 'alarm:handle' },
   ].filter((panel) => can(panel.permission)),
 )
 const userPanels = computed(() =>
@@ -454,6 +487,20 @@ const userPanels = computed(() =>
 
 function can(permission: string) {
   return permissionSet.value.has(permission)
+}
+
+function openMetric(target: MetricTarget) {
+  if (!can(target.permission)) return
+
+  activeTab.value = target.tab
+
+  if (target.tab === 'drones') {
+    activeDronePanel.value = target.panel
+  } else if (target.tab === 'orders') {
+    activeOrderPanel.value = target.panel
+  } else {
+    activeAlarmPanel.value = target.panel
+  }
 }
 
 watchEffect(() => {
@@ -616,6 +663,15 @@ function matchesOrderFilter(item: CustomerOrderItem) {
   )
 }
 
+function applyLocalOrderEdits(items: CustomerOrderItem[]) {
+  return items.map((item) => {
+    if (!item.orderId) return item
+
+    const localEdit = localOrderEdits.value.get(item.orderId)
+    return localEdit ? { ...item, ...localEdit } : item
+  })
+}
+
 async function fetchAllSchedulerOrdersForFilter() {
   const firstPage = await fetchSchedulerOrderPage({ current: 1, size: orderPage.size })
   const firstItems = pageItems<CustomerOrderItem>(firstPage)
@@ -652,8 +708,20 @@ function logValue(item: OperationLogItem, keys: string[]) {
   return '-'
 }
 
+function localDateTimeText(date = new Date()) {
+  const pad = (value: number) => String(value).padStart(2, '0')
+
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 function formatDate(value?: string) {
   if (!value) return '-'
+
+  if (/[zZ]$|[+-]\d{2}:\d{2}$/.test(value)) {
+    const date = new Date(value)
+    if (!Number.isNaN(date.getTime())) return localDateTimeText(date)
+  }
+
   return value.replace('T', ' ').slice(0, 16)
 }
 
@@ -734,7 +802,7 @@ async function loadDrones() {
 
 async function loadOrders() {
   if (auth.token.startsWith('demo-') || fallbackMode.value) {
-    const filtered = demoOrders.filter(matchesOrderFilter)
+    const filtered = applyLocalOrderEdits(demoOrders).filter(matchesOrderFilter)
     orders.value = pageSlice(filtered, orderPage).map((item) => ({ ...item }))
     orderTotal.value = filtered.length
     return
@@ -743,7 +811,7 @@ async function loadOrders() {
   try {
     if (hasQuery(orderFilter)) {
       const allItems = await fetchAllSchedulerOrdersForFilter()
-      const filtered = allItems.filter(matchesOrderFilter)
+      const filtered = applyLocalOrderEdits(allItems).filter(matchesOrderFilter)
 
       if (orderPage.current > totalPages(filtered.length, orderPage)) {
         orderPage.current = totalPages(filtered.length, orderPage)
@@ -755,7 +823,7 @@ async function loadOrders() {
     }
 
     const page = await fetchSchedulerOrderPage(orderPage)
-    const items = pageItems<CustomerOrderItem>(page)
+    const items = applyLocalOrderEdits(pageItems<CustomerOrderItem>(page))
     const total = page.total ?? items.length
 
     if (!items.length && total > 0 && orderPage.current > 1) {
@@ -767,7 +835,7 @@ async function loadOrders() {
     orders.value = items
     orderTotal.value = total
   } catch {
-    const filtered = demoOrders.filter(matchesOrderFilter)
+    const filtered = applyLocalOrderEdits(demoOrders).filter(matchesOrderFilter)
 
     if (orderPage.current > totalPages(filtered.length, orderPage)) {
       orderPage.current = totalPages(filtered.length, orderPage)
@@ -1117,22 +1185,25 @@ async function removeDrone(item: DroneItem) {
   }
 }
 
-async function generateDroneMaintenance(item: DroneItem) {
+function openDroneAlarmEditor(item: DroneItem, event?: MouseEvent) {
   if (!item.droneId) return
 
-  try {
-    await createMaintenanceRecord({
+  actionMessage.value = ''
+  actionError.value = ''
+
+  editAlarm(
+    {
+      alarmId: undefined,
       droneId: item.droneId,
-      maintainerId: auth.profile?.userId,
-      maintainType: '告警维护',
-      maintainResult: '待维护',
-      maintainTime: new Date().toISOString(),
-      remark: `由 ${item.droneCode} 生成告警维护记录`,
-    })
-    showSuccess(`已为 ${item.droneCode} 生成告警维护记录`)
-  } catch {
-    useMockData(`维护记录接口不可用，已模拟为 ${item.droneCode} 生成告警维护`)
-  }
+      taskId: null,
+      alarmType: '设备异常',
+      alarmLevel: '警告',
+      alarmStatus: '待处理',
+      handlerId: auth.profile?.userId || undefined,
+      handleResult: '',
+    },
+    event,
+  )
 }
 
 async function setDroneStatus(item: DroneItem, status: string) {
@@ -1181,22 +1252,27 @@ function editOrder(item: CustomerOrderItem) {
 }
 
 async function submitOrder() {
+  if (orderSubmitting.value) return
+
+  orderSubmitting.value = true
   const draft = { ...orderForm }
+  const editingId = editingOrderId.value
   const fallbackOrder: CustomerOrderItem = {
     ...draft,
-    orderId: editingOrderId.value ?? nextId(orders.value, 'orderId'),
+    orderId: editingId ?? nextId(orders.value, 'orderId'),
     orderNo: `MOCK-${Date.now()}`,
     orderStatus: draft.orderStatus ?? '待审核',
     createdAt: new Date().toISOString(),
   }
 
   try {
-    if (editingOrderId.value) {
-      const updated = { ...draft, orderId: editingOrderId.value }
+    if (editingId) {
+      const updated = { ...draft, orderId: editingId }
       await updateOrder(updated)
-      orders.value = orders.value.map((item) => (item.orderId === editingOrderId.value ? { ...item, ...updated } : item))
+      localOrderEdits.value.set(editingId, updated)
+      orders.value = orders.value.map((item) => (item.orderId === editingId ? { ...item, ...updated } : item))
       resetOrderForm()
-      await loadOrders()
+      activeOrderPanel.value = 'orders'
       showSuccess('订单已修改')
     } else {
       const created = await createOrder(draft)
@@ -1213,8 +1289,11 @@ async function submitOrder() {
       showSuccess('订单已创建')
     }
   } catch {
-    if (editingOrderId.value) {
-      orders.value = orders.value.map((item) => (item.orderId === editingOrderId.value ? { ...item, ...fallbackOrder } : item))
+    if (editingId) {
+      const fallbackUpdate = { ...draft, orderId: editingId, orderStatus: draft.orderStatus ?? '待审核' }
+      localOrderEdits.value.set(editingId, fallbackUpdate)
+      orders.value = orders.value.map((item) => (item.orderId === editingId ? { ...item, ...fallbackUpdate } : item))
+      activeOrderPanel.value = 'orders'
       useMockData('订单修改接口不可用，已临时更新 mock 数据')
     } else {
       orders.value.unshift(fallbackOrder)
@@ -1222,6 +1301,8 @@ async function submitOrder() {
       useMockData('订单创建接口不可用，已临时写入 mock 数据')
     }
     resetOrderForm()
+  } finally {
+    orderSubmitting.value = false
   }
 }
 
@@ -1278,9 +1359,16 @@ function resetRouteForm() {
   })
 }
 
-function editRoute(item: RouteItem) {
+function editRoute(item: RouteItem, event?: MouseEvent) {
   editingRouteId.value = item.routeId ?? null
   activeOrderPanel.value = 'routes'
+  routeEditorReturnY.value = window.scrollY
+  routeEditorReturnRouteId.value = item.routeId ?? null
+  routeEditorReturnTop.value =
+    event instanceof MouseEvent
+      ? ((event.currentTarget as HTMLElement).closest('.table-row') as HTMLElement | null)?.getBoundingClientRect().top ?? 0
+      : 0
+  routeEditorOpen.value = true
   Object.assign(routeForm, {
     routeName: item.routeName,
     startPointId: item.startPointId ?? 1,
@@ -1292,6 +1380,29 @@ function editRoute(item: RouteItem) {
   })
 }
 
+function restoreRouteEditorPosition() {
+  requestAnimationFrame(() => {
+    const row =
+      routeEditorReturnRouteId.value === null
+        ? null
+        : document.querySelector<HTMLElement>(`[data-route-row="${routeEditorReturnRouteId.value}"]`)
+
+    if (row && routeEditorReturnTop.value) {
+      const nextTop = window.scrollY + row.getBoundingClientRect().top - routeEditorReturnTop.value
+      window.scrollTo({ top: nextTop, behavior: 'auto' })
+      return
+    }
+
+    window.scrollTo({ top: routeEditorReturnY.value, behavior: 'auto' })
+  })
+}
+
+function closeRouteEditor() {
+  routeEditorOpen.value = false
+  resetRouteForm()
+  restoreRouteEditorPosition()
+}
+
 async function submitRoute() {
   const draft = { ...routeForm }
   const fallbackRoute = { ...draft, routeId: editingRouteId.value ?? nextId(routes.value, 'routeId') }
@@ -1301,8 +1412,10 @@ async function submitRoute() {
       const updated = { ...draft, routeId: editingRouteId.value }
       await updateRoute(updated)
       routes.value = routes.value.map((item) => (item.routeId === editingRouteId.value ? updated : item))
+      routeEditorOpen.value = false
       resetRouteForm()
       await loadRoutes()
+      restoreRouteEditorPosition()
       showSuccess('航线全部信息已修改')
     } else {
       await createRoute(draft)
@@ -1315,6 +1428,9 @@ async function submitRoute() {
   } catch {
     if (editingRouteId.value) {
       routes.value = routes.value.map((item) => (item.routeId === editingRouteId.value ? fallbackRoute : item))
+      routeEditorOpen.value = false
+      resetRouteForm()
+      restoreRouteEditorPosition()
       useMockData('航线修改接口不可用，已临时更新 mock 数据')
     } else {
       routes.value.unshift(fallbackRoute)
@@ -1369,9 +1485,16 @@ async function submitRouteNode() {
   }
 }
 
-function editAlarm(item: AlarmEventItem) {
+function editAlarm(item: AlarmEventItem, event?: MouseEvent) {
   editingAlarmId.value = item.alarmId ?? null
-  activeAlarmPanel.value = 'handle'
+  activeAlarmPanel.value = 'list'
+  alarmEditorReturnY.value = window.scrollY
+  alarmEditorReturnAlarmId.value = item.alarmId ?? null
+  alarmEditorReturnTop.value =
+    event instanceof MouseEvent
+      ? ((event.currentTarget as HTMLElement).closest('.table-row') as HTMLElement | null)?.getBoundingClientRect().top ?? 0
+      : 0
+  alarmEditorOpen.value = true
   Object.assign(alarmForm, {
     alarmId: item.alarmId,
     droneId: item.droneId,
@@ -1386,6 +1509,7 @@ function editAlarm(item: AlarmEventItem) {
 
 function resetAlarmForm() {
   editingAlarmId.value = null
+  alarmEditorOpen.value = false
   Object.assign(alarmForm, {
     alarmId: undefined,
     droneId: undefined,
@@ -1398,24 +1522,61 @@ function resetAlarmForm() {
   })
 }
 
+function restoreAlarmEditorPosition() {
+  requestAnimationFrame(() => {
+    const row =
+      alarmEditorReturnAlarmId.value === null
+        ? null
+        : document.querySelector<HTMLElement>(`[data-alarm-row="${alarmEditorReturnAlarmId.value}"]`)
+
+    if (row && alarmEditorReturnTop.value) {
+      const nextTop = window.scrollY + row.getBoundingClientRect().top - alarmEditorReturnTop.value
+      window.scrollTo({ top: nextTop, behavior: 'auto' })
+      return
+    }
+
+    window.scrollTo({ top: alarmEditorReturnY.value, behavior: 'auto' })
+  })
+}
+
+function closeAlarmEditor() {
+  resetAlarmForm()
+  restoreAlarmEditorPosition()
+}
+
 async function submitAlarmHandle() {
-  if (!editingAlarmId.value) return
+  const alarmId = alarmForm.alarmId ?? editingAlarmId.value
+
+  if (!alarmId) {
+    showError(new Error('请先填写告警 ID'), '请先填写告警 ID')
+    return
+  }
 
   const payload = {
-    ...alarmForm,
-    alarmId: editingAlarmId.value,
+    alarmId,
+    droneId: alarmForm.droneId,
+    taskId: alarmForm.taskId ?? null,
+    alarmType: alarmForm.alarmType,
+    alarmLevel: alarmForm.alarmLevel,
+    alarmStatus: alarmForm.alarmStatus,
     handlerId: alarmForm.handlerId ?? auth.profile?.userId ?? undefined,
+    handleResult: alarmForm.handleResult,
   }
 
   try {
-    await handleAlarm(payload)
-    alarms.value = alarms.value.map((item) => (item.alarmId === editingAlarmId.value ? payload : item))
-    resetAlarmForm()
+    await editAlarmApi(payload)
+    alarms.value = alarms.value.map((item) => (item.alarmId === alarmId ? { ...item, ...payload } : item))
     await loadAlarms()
+    resetAlarmForm()
+    activeAlarmPanel.value = 'list'
+    await nextTick()
+    restoreAlarmEditorPosition()
     showSuccess('告警处理信息已更新')
   } catch {
-    alarms.value = alarms.value.map((item) => (item.alarmId === editingAlarmId.value ? payload : item))
+    alarms.value = alarms.value.map((item) => (item.alarmId === alarmId ? { ...item, ...payload } : item))
     resetAlarmForm()
+    activeAlarmPanel.value = 'list'
+    restoreAlarmEditorPosition()
     useMockData('告警处理接口不可用，已临时更新 mock 信息')
   }
 }
@@ -1425,7 +1586,7 @@ async function resolveAlarm(item: AlarmEventItem) {
 
   try {
     await handleAlarm({
-      ...item,
+      alarmId: item.alarmId,
       alarmStatus: '已处理',
       handlerId: auth.profile?.userId || undefined,
       handleResult: item.handleResult || '平台确认处理',
@@ -1554,7 +1715,16 @@ onMounted(loadAll)
       <p v-if="actionError" class="notice error">{{ actionError }}</p>
 
       <section v-if="activeTab === 'overview'" class="overview-grid">
-        <article v-for="item in metrics" :key="item.label" class="metric card">
+        <article
+          v-for="item in metrics"
+          :key="item.label"
+          :class="['metric card', { clickable: can(item.target.permission) }]"
+          :role="can(item.target.permission) ? 'button' : undefined"
+          :tabindex="can(item.target.permission) ? 0 : -1"
+          @click="openMetric(item.target)"
+          @keydown.enter.prevent="openMetric(item.target)"
+          @keydown.space.prevent="openMetric(item.target)"
+        >
           <span>{{ item.label }}</span>
           <strong>{{ item.value }}</strong>
           <p>{{ item.hint }}</p>
@@ -1620,7 +1790,7 @@ onMounted(loadAll)
           <form class="filter-grid" @submit.prevent="applyDroneSearch">
             <label><span>编号</span><input v-model="droneFilter.droneCode" placeholder="UAV" /></label>
             <label><span>型号</span><input v-model="droneFilter.model" placeholder="M300" /></label>
-            <label><span>状态</span><select v-model="droneFilter.status"><option value="">全部</option><option>空闲</option><option>任务中</option><option>维护中</option><option>停用</option></select></label>
+            <label><span>状态</span><select v-model="droneFilter.status"><option value="">全部</option><option>空闲</option><option>任务中</option><option>维护中</option><option>停用</option><option>已退役</option></select></label>
             <label><span>园区 ID</span><input v-model.number="droneFilter.parkId" type="number" min="1" /></label>
             <div class="filter-actions"><button class="outline-btn" type="button" @click="resetDroneSearch">重置</button><button class="primary-btn" type="submit">查询</button></div>
           </form>
@@ -1639,7 +1809,7 @@ onMounted(loadAll)
                   <button class="text-btn" @click="setDroneStatus(item, '维护中')">维护中</button>
                   <button class="text-btn danger" @click="setDroneStatus(item, '停用')">停用</button>
                 </template>
-                <button class="text-btn" @click="generateDroneMaintenance(item)">告警维护</button>
+                <button class="text-btn" @click="openDroneAlarmEditor(item, $event)">告警维护</button>
                 <button v-if="can('drone:delete')" class="text-btn danger" @click="removeDrone(item)">删除</button>
               </span>
               <span v-else>-</span>
@@ -1735,11 +1905,11 @@ onMounted(loadAll)
           </form>
           <div class="table route-table">
             <div class="table-row table-head"><span>ID</span><span>名称</span><span>起点</span><span>终点</span><span>距离</span><span>预计分钟</span><span>风险</span><span>状态</span><span>操作</span></div>
-            <div v-for="item in routes" :key="item.routeId" class="table-row">
+            <div v-for="item in routes" :key="item.routeId" class="table-row" :data-route-row="item.routeId">
               <span>{{ item.routeId ?? '-' }}</span><span>{{ item.routeName }}</span><span>{{ item.startPointId ?? '-' }}</span><span>{{ item.endPointId ?? '-' }}</span><span>{{ item.distanceKm ?? '-' }}</span><span>{{ item.estimateMinutes ?? '-' }}</span><span>{{ item.riskLevel ?? '-' }}</span><span>{{ item.enabled === 0 ? '停用' : '启用' }}</span>
               <span class="row-actions">
                 <button class="text-btn" @click="loadRouteNodes(item.routeId)">节点</button>
-                <button v-if="can('route:update')" class="text-btn" @click="editRoute(item)">修改</button>
+                <button v-if="can('route:update')" class="text-btn" @click="editRoute(item, $event)">修改</button>
                 <button v-if="can('route:delete')" class="text-btn danger" @click="removeRoute(item)">删除</button>
               </span>
             </div>
@@ -1822,12 +1992,31 @@ onMounted(loadAll)
             <label><span>送达点 ID</span><input v-model.number="orderForm.deliveryPointId" type="number" min="1" /></label>
             <label><span>优先级</span><select v-model="orderForm.priority"><option>普通</option><option>加急</option></select></label>
             <label v-if="editingOrderId"><span>状态</span><select v-model="orderForm.orderStatus"><option>待审核</option><option>执行中</option><option>已完成</option><option>已取消</option></select></label>
-            <div class="button-row"><button class="outline-btn" type="button" @click="resetOrderForm">清空</button><button class="primary-btn" type="submit">{{ editingOrderId ? '保存订单' : '创建订单' }}</button></div>
+            <div class="button-row"><button class="outline-btn" type="button" @click="resetOrderForm">清空</button><button class="primary-btn" :disabled="orderSubmitting" type="submit">{{ orderSubmitting ? '保存中...' : editingOrderId ? '保存订单' : '创建订单' }}</button></div>
           </form>
         </section>
 
-        <section v-if="activeOrderPanel === 'routes' && (can('route:add') || can('route:update'))" class="card form-panel">
-          <div class="section-title"><h2>{{ editingRouteId ? '修改航线' : '新增航线' }}</h2></div>
+        <div v-if="routeEditorOpen" class="modal-backdrop" role="presentation" @click.self="closeRouteEditor">
+          <section class="modal-card route-modal" role="dialog" aria-modal="true" aria-labelledby="route-edit-title">
+            <div class="section-title">
+              <h2 id="route-edit-title">修改航线</h2>
+              <button class="text-btn" type="button" @click="closeRouteEditor">关闭</button>
+            </div>
+            <form class="field-grid" @submit.prevent="submitRoute">
+              <label><span>航线名称</span><input v-model="routeForm.routeName" required placeholder="总部到南区航线" /></label>
+              <label><span>起点 ID</span><input v-model.number="routeForm.startPointId" type="number" min="1" /></label>
+              <label><span>终点 ID</span><input v-model.number="routeForm.endPointId" type="number" min="1" /></label>
+              <label><span>距离 km</span><input v-model.number="routeForm.distanceKm" type="number" min="0" step="0.1" /></label>
+              <label><span>预计分钟</span><input v-model.number="routeForm.estimateMinutes" type="number" min="0" /></label>
+              <label><span>风险等级</span><select v-model="routeForm.riskLevel"><option>低</option><option>中</option><option>高</option></select></label>
+              <label><span>启用状态</span><select v-model.number="routeForm.enabled"><option :value="1">启用</option><option :value="0">停用</option></select></label>
+              <div class="button-row"><button class="outline-btn" type="button" @click="closeRouteEditor">取消</button><button class="primary-btn" type="submit">保存航线</button></div>
+            </form>
+          </section>
+        </div>
+
+        <section v-if="activeOrderPanel === 'routes' && can('route:add')" class="card form-panel">
+          <div class="section-title"><h2>新增航线</h2></div>
           <form class="field-grid" @submit.prevent="submitRoute">
             <label><span>航线名称</span><input v-model="routeForm.routeName" required placeholder="总部到南区航线" /></label>
             <label><span>起点 ID</span><input v-model.number="routeForm.startPointId" type="number" min="1" /></label>
@@ -1836,7 +2025,7 @@ onMounted(loadAll)
             <label><span>预计分钟</span><input v-model.number="routeForm.estimateMinutes" type="number" min="0" /></label>
             <label><span>风险等级</span><select v-model="routeForm.riskLevel"><option>低</option><option>中</option><option>高</option></select></label>
             <label><span>启用状态</span><select v-model.number="routeForm.enabled"><option :value="1">启用</option><option :value="0">停用</option></select></label>
-            <div class="button-row"><button class="outline-btn" type="button" @click="resetRouteForm">清空</button><button class="primary-btn" type="submit">{{ editingRouteId ? '保存航线' : '新增航线' }}</button></div>
+            <div class="button-row"><button class="outline-btn" type="button" @click="resetRouteForm">清空</button><button class="primary-btn" type="submit">新增航线</button></div>
           </form>
         </section>
       </section>
@@ -1865,10 +2054,10 @@ onMounted(loadAll)
           </form>
           <div class="table alarm-table">
             <div class="table-row table-head"><span>ID</span><span>无人机</span><span>类型</span><span>等级</span><span>状态</span><span>时间</span><span>处理结果</span><span>操作</span></div>
-            <div v-for="item in alarms" :key="item.alarmId" class="table-row">
+            <div v-for="item in alarms" :key="item.alarmId" class="table-row" :data-alarm-row="item.alarmId">
               <span>{{ item.alarmId }}</span><span>{{ item.droneId ?? '-' }}</span><span>{{ item.alarmType ?? '-' }}</span><span>{{ item.alarmLevel ?? '-' }}</span><span>{{ item.alarmStatus ?? '-' }}</span><span>{{ formatDate(item.alarmTime) }}</span><span>{{ item.handleResult ?? '-' }}</span>
               <span v-if="can('alarm:handle')" class="row-actions">
-                <button class="text-btn" @click="editAlarm(item)">编辑处理</button>
+                <button class="text-btn" @click="editAlarm(item, $event)">编辑处理</button>
                 <button class="text-btn" @click="resolveAlarm(item)">标记处理</button>
               </span>
               <span v-else>-</span>
@@ -1894,10 +2083,10 @@ onMounted(loadAll)
           <div class="section-title"><h2>告警处理信息更新</h2></div>
           <form class="field-grid" @submit.prevent="submitAlarmHandle">
             <label><span>告警 ID</span><input v-model.number="alarmForm.alarmId" disabled type="number" /></label>
-            <label><span>无人机 ID</span><input v-model.number="alarmForm.droneId" type="number" min="1" /></label>
-            <label><span>任务 ID</span><input v-model.number="alarmForm.taskId" type="number" min="1" /></label>
-            <label><span>类型</span><input v-model="alarmForm.alarmType" /></label>
-            <label><span>等级</span><select v-model="alarmForm.alarmLevel"><option>提示</option><option>警告</option><option>严重</option></select></label>
+            <label><span>无人机 ID</span><input v-model.number="alarmForm.droneId" disabled type="number" min="1" /></label>
+            <label><span>任务 ID</span><input v-model.number="alarmForm.taskId" disabled type="number" min="1" /></label>
+            <label><span>类型</span><input v-model="alarmForm.alarmType" disabled /></label>
+            <label><span>等级</span><select v-model="alarmForm.alarmLevel" disabled><option>提示</option><option>警告</option><option>严重</option></select></label>
             <label><span>状态</span><select v-model="alarmForm.alarmStatus"><option>待处理</option><option>已处理</option></select></label>
             <label><span>处理人 ID</span><input v-model.number="alarmForm.handlerId" type="number" min="1" /></label>
             <label class="full-width"><span>处理结果</span><input v-model="alarmForm.handleResult" placeholder="已降落充电" /></label>
@@ -2000,6 +2189,26 @@ onMounted(loadAll)
         </section>
       </section>
     </main>
+
+    <div v-if="alarmEditorOpen" class="modal-backdrop" role="presentation" @click.self="closeAlarmEditor">
+      <section class="modal-card alarm-modal" role="dialog" aria-modal="true" aria-labelledby="alarm-edit-title">
+        <div class="section-title">
+          <h2 id="alarm-edit-title">编辑告警</h2>
+          <button class="text-btn" type="button" @click="closeAlarmEditor">关闭</button>
+        </div>
+        <form class="field-grid" @submit.prevent="submitAlarmHandle">
+          <label><span>告警 ID</span><input v-model.number="alarmForm.alarmId" :disabled="Boolean(editingAlarmId)" required type="number" min="1" /></label>
+          <label><span>无人机 ID</span><input v-model.number="alarmForm.droneId" required type="number" min="1" /></label>
+          <label><span>任务 ID</span><input v-model.number="alarmForm.taskId" type="number" min="1" /></label>
+          <label><span>类型</span><input v-model="alarmForm.alarmType" required placeholder="电池电量过低" /></label>
+          <label><span>等级</span><select v-model="alarmForm.alarmLevel"><option>提示</option><option>警告</option><option>严重</option><option>紧急</option></select></label>
+          <label><span>状态</span><select v-model="alarmForm.alarmStatus"><option>待处理</option><option>已处理</option></select></label>
+          <label><span>处理人 ID</span><input v-model.number="alarmForm.handlerId" type="number" min="1" /></label>
+          <label class="full-width"><span>处理结果</span><input v-model="alarmForm.handleResult" placeholder="更换备用电池，设备恢复正常" /></label>
+          <div class="button-row"><button class="outline-btn" type="button" @click="closeAlarmEditor">取消</button><button class="primary-btn" :disabled="!alarmForm.alarmId" type="submit">保存告警</button></div>
+        </form>
+      </section>
+    </div>
   </div>
 </template>
 
@@ -2013,15 +2222,59 @@ onMounted(loadAll)
   margin: 0;
   padding: 18px;
   background: #f5f7fb;
+  background-image:
+    linear-gradient(rgba(15, 118, 110, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(37, 99, 235, 0.04) 1px, transparent 1px);
+  background-size: 34px 34px;
+  animation: gridDrift 22s linear infinite;
   font-size: 16px;
+  isolation: isolate;
 }
 
 .sidebar,
 .card {
+  position: relative;
+  overflow: hidden;
   border: 1px solid rgba(148, 163, 184, 0.22);
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.92);
   box-shadow: 0 16px 38px rgba(15, 23, 42, 0.06);
+  transition:
+    transform 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    background 180ms ease;
+}
+
+.card::after {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  content: '';
+  background: linear-gradient(115deg, transparent 0%, rgba(255, 255, 255, 0.38) 42%, transparent 58%);
+  opacity: 0;
+  transform: translateX(-38%);
+  transition: opacity 180ms ease;
+}
+
+.card:hover {
+  border-color: rgba(15, 118, 110, 0.28);
+  box-shadow: 0 18px 44px rgba(15, 23, 42, 0.08);
+}
+
+.metric:hover,
+.wide-panel:hover,
+.side-panel:hover,
+.table-panel:hover,
+.form-panel:hover {
+  transform: translateY(-2px);
+}
+
+.metric:hover::after,
+.wide-panel:hover::after,
+.side-panel:hover::after {
+  opacity: 1;
+  animation: panelSheen 820ms ease;
 }
 
 .sidebar {
@@ -2033,6 +2286,7 @@ onMounted(loadAll)
   gap: 18px;
   padding: 20px 16px;
   color: #1f2937;
+  animation: panelEnter 520ms ease both;
 }
 
 .brand {
@@ -2053,6 +2307,8 @@ onMounted(loadAll)
   background: #0f766e;
   color: #ffffff;
   font-weight: 850;
+  box-shadow: 0 10px 22px rgba(15, 118, 110, 0.2);
+  animation: logoPulse 2600ms ease-in-out infinite;
 }
 
 .brand strong,
@@ -2088,11 +2344,17 @@ select {
   color: #64748b;
   cursor: pointer;
   text-align: left;
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    background 160ms ease,
+    color 160ms ease;
 }
 
 .nav-item:hover {
   background: rgba(15, 118, 110, 0.06);
   color: #1f2937;
+  transform: translateX(3px);
 }
 
 .nav-item.active {
@@ -2100,6 +2362,7 @@ select {
   background: rgba(15, 118, 110, 0.1);
   color: #0f766e;
   font-weight: 800;
+  box-shadow: inset 3px 0 0 #0f766e;
 }
 
 .user-panel {
@@ -2128,6 +2391,13 @@ select {
   gap: 18px;
 }
 
+.content > * {
+  animation: panelEnter 480ms ease both;
+}
+
+.content > *:nth-child(2) { animation-delay: 50ms; }
+.content > *:nth-child(3) { animation-delay: 100ms; }
+
 .page-head,
 .section-title,
 .button-row,
@@ -2155,6 +2425,9 @@ select {
 }
 
 .status-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   align-self: flex-start;
   padding: 9px 14px;
   border-radius: 999px;
@@ -2162,6 +2435,17 @@ select {
   color: #0f766e;
   font-size: 0.94rem;
   white-space: nowrap;
+}
+
+.status-area::before {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: #0f766e;
+  box-shadow: 0 0 0 0 rgba(15, 118, 110, 0.32);
+  content: '';
+  animation: statusPulse 1800ms ease-out infinite;
 }
 
 .notice {
@@ -2186,13 +2470,34 @@ select {
   padding: 24px;
   min-height: 150px;
   background: rgba(255, 255, 255, 0.92);
+  animation: panelEnter 520ms ease both;
 }
+.metric:nth-child(1) { animation-delay: 80ms; }
+.metric:nth-child(2) { animation-delay: 130ms; }
+.metric:nth-child(3) { animation-delay: 180ms; }
+.metric:nth-child(4) { animation-delay: 230ms; }
 .metric:nth-child(1) { background: rgba(15, 118, 110, 0.08); }
 .metric:nth-child(2) { background: rgba(37, 99, 235, 0.08); }
 .metric:nth-child(3) { background: rgba(180, 83, 9, 0.08); }
 .metric:nth-child(4) { background: rgba(190, 18, 60, 0.08); }
+.metric.clickable {
+  cursor: pointer;
+}
+.metric.clickable:focus-visible {
+  outline: 3px solid rgba(15, 118, 110, 0.24);
+  outline-offset: 3px;
+}
+.metric.clickable:hover {
+  border-color: rgba(15, 118, 110, 0.36);
+}
 .metric span { font-size: 0.94rem; color: #64748b; }
-.metric strong { color: #0f766e; font-size: 2.6rem; line-height: 1; font-weight: 850; }
+.metric strong {
+  color: #0f766e;
+  font-size: 2.6rem;
+  line-height: 1;
+  font-weight: 850;
+  animation: numberPop 520ms ease both;
+}
 .metric p { color: #64748b; }
 
 .wide-panel,
@@ -2206,6 +2511,41 @@ select {
 .full-width { grid-column: 1 / -1; }
 
 .section-title h2 { font-size: 1.28rem; color: #1f2937; }
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  background: rgba(15, 23, 42, 0.34);
+  backdrop-filter: blur(8px);
+  animation: modalFade 180ms ease both;
+}
+
+.modal-card {
+  width: min(760px, 100%);
+  max-height: min(760px, calc(100vh - 44px));
+  overflow-y: auto;
+  padding: 26px;
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.18);
+  animation: modalEnter 220ms ease both;
+}
+
+.route-modal .field-grid,
+.alarm-modal .field-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 18px;
+}
+
+.route-modal .button-row,
+.alarm-modal .button-row {
+  grid-column: 1 / -1;
+}
 
 .split-layout {
   display: grid;
@@ -2237,11 +2577,17 @@ select {
   font-weight: 750;
   cursor: pointer;
   white-space: nowrap;
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    background 160ms ease,
+    color 160ms ease;
 }
 
 .subnav-item:hover {
   background: rgba(15, 118, 110, 0.06);
   color: #1f2937;
+  transform: translateY(-1px);
 }
 
 .subnav-item.active {
@@ -2308,35 +2654,111 @@ input:disabled { background: rgba(226, 232, 240, 0.55); color: #64748b; }
   min-height: 44px;
   cursor: pointer;
   font-weight: 750;
+  transition:
+    transform 150ms ease,
+    border-color 150ms ease,
+    background 150ms ease,
+    color 150ms ease,
+    box-shadow 150ms ease;
 }
 .primary-btn { border-color: #0f766e; background: #0f766e; color: #ffffff; }
 .outline-btn,
 .text-btn { background: #ffffff; color: #1f2937; }
 .text-btn.danger { color: #b42318; }
+.primary-btn:hover:not(:disabled),
+.outline-btn:hover:not(:disabled),
+.text-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+}
+.primary-btn:active:not(:disabled),
+.outline-btn:active:not(:disabled),
+.text-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
 
 .table,
-.compact-table { display: grid; gap: 12px; margin-top: 16px; overflow-x: auto; }
-.table-row {
-  min-width: 780px;
+.compact-table {
   display: grid;
+  gap: 12px;
+  margin-top: 16px;
+  overflow-x: auto;
+  width: 100%;
+}
+.table-row {
+  width: 100%;
+  min-width: var(--table-min-width, 780px);
+  display: grid;
+  grid-template-columns: var(--table-columns);
   gap: 14px;
   align-items: center;
   padding: 16px 14px;
   border-radius: 10px;
   background: rgba(248, 250, 252, 0.86);
   line-height: 1.35;
+  transition:
+    transform 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease;
+}
+.table-row:not(.table-head) {
+  animation: rowEnter 360ms ease both;
+}
+.table-row:not(.table-head):hover {
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.06);
+  transform: translateX(3px);
+}
+.table-row > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .table-head { background: transparent; color: #64748b; font-weight: 800; }
-.compact-table .table-row { grid-template-columns: 80px 1.2fr 1fr 1fr 1.2fr; }
-.drone-table .table-row { grid-template-columns: 1.1fr 0.6fr 1fr 0.7fr 0.7fr 0.7fr 0.9fr 2fr; }
-.order-table .table-row { grid-template-columns: 1.1fr 1fr 0.7fr 0.7fr 0.7fr 0.9fr 1.3fr; }
-.route-table .table-row { grid-template-columns: 70px 1.2fr 0.65fr 0.65fr 0.65fr 0.8fr 0.7fr 0.7fr 1.5fr; }
-.task-table .table-row { grid-template-columns: 70px 1.2fr 0.75fr 0.75fr 0.75fr 0.9fr 0.9fr 1fr; }
-.route-node-table .table-row { grid-template-columns: 70px 0.8fr 0.8fr 1fr 1fr 0.8fr 0.9fr; }
-.alarm-table .table-row { grid-template-columns: 70px 90px 1fr 0.8fr 0.9fr 1.2fr 1.4fr 1fr; }
-.user-table .table-row { grid-template-columns: 70px 1fr 1fr 0.9fr 0.8fr 1.4fr; }
-.role-table .table-row { grid-template-columns: 70px 1fr 2fr; }
-.log-table .table-row { grid-template-columns: 70px 1fr 1.2fr 1fr 1.2fr; }
+.table .row-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.compact-table {
+  --table-min-width: 640px;
+  --table-columns: 80px minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.2fr);
+}
+.drone-table {
+  --table-min-width: 1080px;
+  --table-columns: minmax(82px, 0.9fr) minmax(44px, 0.42fr) minmax(112px, 0.92fr) minmax(50px, 0.46fr) minmax(50px, 0.46fr) minmax(50px, 0.46fr) minmax(70px, 0.62fr) minmax(380px, 2.9fr);
+}
+.order-table {
+  --table-min-width: 860px;
+  --table-columns: minmax(140px, 1.1fr) minmax(100px, 1fr) minmax(64px, 0.7fr) minmax(72px, 0.7fr) minmax(72px, 0.7fr) minmax(112px, 0.9fr) minmax(140px, 1.3fr);
+}
+.route-table {
+  --table-min-width: 980px;
+  --table-columns: 70px minmax(120px, 1.2fr) minmax(64px, 0.65fr) minmax(64px, 0.65fr) minmax(64px, 0.65fr) minmax(82px, 0.8fr) minmax(64px, 0.7fr) minmax(64px, 0.7fr) minmax(150px, 1.5fr);
+}
+.task-table {
+  --table-min-width: 900px;
+  --table-columns: 70px minmax(110px, 1.2fr) minmax(76px, 0.75fr) minmax(76px, 0.75fr) minmax(76px, 0.75fr) minmax(86px, 0.9fr) minmax(110px, 0.9fr) minmax(110px, 1fr);
+}
+.route-node-table {
+  --table-min-width: 780px;
+  --table-columns: 70px minmax(72px, 0.8fr) minmax(72px, 0.8fr) minmax(112px, 1fr) minmax(112px, 1fr) minmax(72px, 0.8fr) minmax(86px, 0.9fr);
+}
+.alarm-table {
+  --table-min-width: 980px;
+  --table-columns: 70px 90px minmax(100px, 1fr) minmax(74px, 0.8fr) minmax(86px, 0.9fr) minmax(120px, 1.2fr) minmax(140px, 1.4fr) minmax(120px, 1fr);
+}
+.user-table {
+  --table-min-width: 720px;
+  --table-columns: 70px minmax(100px, 1fr) minmax(100px, 1fr) minmax(90px, 0.9fr) minmax(74px, 0.8fr) minmax(130px, 1.4fr);
+}
+.role-table {
+  --table-min-width: 520px;
+  --table-columns: 70px minmax(120px, 1fr) minmax(200px, 2fr);
+}
+.log-table {
+  --table-min-width: 720px;
+  --table-columns: 70px minmax(100px, 1fr) minmax(120px, 1.2fr) minmax(100px, 1fr) minmax(120px, 1.2fr);
+}
 
 .pagination {
   display: flex;
@@ -2370,11 +2792,94 @@ input:disabled { background: rgba(226, 232, 240, 0.55); color: #64748b; }
   opacity: 0.45;
 }
 
-.health-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 0; border-top: 1px solid rgba(148, 163, 184, 0.22); }
+.health-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 0; border-top: 1px solid rgba(148, 163, 184, 0.22); transition: transform 160ms ease, color 160ms ease; }
 .health-item:first-child { border-top: 0; }
 .health-item div { display: grid; gap: 2px; }
 .health-item strong { font-weight: 800; color: #1f2937; }
 .health-item b { font-size: 1.6rem; color: #0f766e; }
+.health-item:hover { transform: translateX(4px); }
+
+@keyframes gridDrift {
+  from { background-position: 0 0, 0 0; }
+  to { background-position: 34px 34px, 34px 34px; }
+}
+
+@keyframes panelEnter {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes rowEnter {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes panelSheen {
+  from { transform: translateX(-55%); }
+  to { transform: translateX(55%); }
+}
+
+@keyframes statusPulse {
+  0% { box-shadow: 0 0 0 0 rgba(15, 118, 110, 0.32); }
+  70% { box-shadow: 0 0 0 9px rgba(15, 118, 110, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(15, 118, 110, 0); }
+}
+
+@keyframes logoPulse {
+  0%,
+  100% { transform: scale(1); }
+  50% { transform: scale(1.04); }
+}
+
+@keyframes numberPop {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes modalFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes modalEnter {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 1ms !important;
+  }
+}
 
 @media (max-width: 1100px) {
   .platform-shell { grid-template-columns: 1fr; }
@@ -2412,6 +2917,8 @@ input:disabled { background: rgba(226, 232, 240, 0.55); color: #64748b; }
   .side-panel { grid-column: auto; }
   .form-panel .field-grid,
   .filter-grid { grid-template-columns: 1fr; }
+  .route-modal .field-grid,
+  .alarm-modal .field-grid { grid-template-columns: 1fr; }
   .filter-actions { grid-column: auto; }
   .table,
   .compact-table { overflow-x: visible; }
@@ -2427,7 +2934,6 @@ input:disabled { background: rgba(226, 232, 240, 0.55); color: #64748b; }
   .user-table .table-row,
   .role-table .table-row,
   .log-table .table-row { min-width: 0; grid-template-columns: 1fr; gap: 8px; padding: 14px; }
-  .table-row span { min-width: 0; overflow-wrap: anywhere; }
   .row-actions { justify-content: flex-start; flex-wrap: wrap; }
   .pagination { justify-content: flex-start; flex-wrap: wrap; }
 }
