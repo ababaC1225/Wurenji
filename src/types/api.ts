@@ -11,13 +11,28 @@ export interface LoginPayload {
 }
 
 export interface LoginResponse {
-  token: string
-  role: string
+  token?: string
+  accessToken?: string
+  jwt?: string
+  role?: string
+  roleName?: string
+  roleCode?: string
   username?: string
   realName?: string
   roleId?: number
   userId?: number
-  permissions?: string
+  permissions?: string | string[]
+  user?: {
+    username?: string
+    realName?: string
+    role?: string
+    roleName?: string
+    roleCode?: string
+    roleId?: number
+    userId?: number
+    permissions?: string | string[]
+  }
+  [key: string]: unknown
 }
 
 export interface SessionProfile {

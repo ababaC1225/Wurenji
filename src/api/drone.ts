@@ -1,5 +1,5 @@
 import request from '../utils/request'
-import type { DroneItem } from '../types/api'
+import type { DroneItem, PageResult } from '../types/api'
 
 export function fetchDroneList() {
   return request<DroneItem[]>('/maintenance/drones/list')
@@ -13,7 +13,7 @@ export function searchDrones(params: {
   current?: number
   size?: number
 } = {}) {
-  return request<DroneItem[]>('/maintenance/drones/search', {
+  return request<DroneItem[] | PageResult<DroneItem>>('/maintenance/drones/search', {
     query: params,
   })
 }

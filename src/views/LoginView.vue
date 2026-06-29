@@ -16,6 +16,75 @@ const loading = ref(false)
 const errorMessage = ref('')
 const showPassword = ref(false)
 
+type LooseRecord = Record<string, unknown>
+
+function asRecord(value: unknown): LooseRecord {
+  return typeof value === 'object' && value !== null ? (value as LooseRecord) : {}
+}
+
+function firstString(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim()
+    if (typeof value === 'number') return String(value)
+  }
+
+  return ''
+}
+
+function firstNumber(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+    if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) return Number(value)
+  }
+
+  return undefined
+}
+
+function normalizePermissions(value: unknown) {
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean).join(',')
+  if (typeof value === 'string') return value
+  return undefined
+}
+
+function decodeJwtPayload(token: string) {
+  const [, payload] = token.split('.')
+
+  if (!payload) return {}
+
+  try {
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/')
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')
+    const json = decodeURIComponent(
+      Array.from(atob(padded))
+        .map((char) => `%${char.charCodeAt(0).toString(16).padStart(2, '0')}`)
+        .join(''),
+    )
+
+    return JSON.parse(json) as LooseRecord
+  } catch {
+    return {}
+  }
+}
+
+function roleIdOf(roleText: string, username: string, explicitRoleId?: number) {
+  if (explicitRoleId && [1, 2, 3].includes(explicitRoleId)) return explicitRoleId
+
+  const keyword = `${roleText} ${username}`.toLowerCase()
+
+  if (/dispatcher|dispatch|调度|order|route|task/.test(keyword)) return 2
+  if (/maintain|maintenance|operator|operations|operation|ops|运维|维护|告警/.test(keyword)) return 3
+  if (/admin|系统管理员|管理员/.test(keyword)) return 1
+
+  return 2
+}
+
+function roleNameOf(roleId: number) {
+  if (roleId === 1) return 'admin'
+  if (roleId === 2) return 'dispatcher'
+  if (roleId === 3) return 'maintenance'
+  return 'dispatcher'
+}
+
 async function onSubmit() {
   loading.value = true
   errorMessage.value = ''
@@ -25,14 +94,51 @@ async function onSubmit() {
       username: form.username.trim(),
       password: form.password,
     })
+    const root = asRecord(result)
+    const user = asRecord(root.user ?? root.sysUser ?? root.loginUser)
+    const token = firstString(
+      result,
+      root.token,
+      root.accessToken,
+      root.access_token,
+      root.jwt,
+      root.tokenValue,
+      root.satoken,
+      root.Authorization,
+      root.authorization,
+    )
+
+    if (!token) {
+      throw new Error('登录成功但未返回 token，请检查后端登录响应字段')
+    }
+
+    const claims = decodeJwtPayload(token)
+    const username = firstString(root.username, user.username, claims.sub, claims.username, form.username.trim())
+    const roleText = firstString(
+      root.role,
+      root.roleName,
+      root.roleCode,
+      user.role,
+      user.roleName,
+      user.roleCode,
+      claims.role,
+      claims.roleName,
+      claims.roleCode,
+    )
+    const roleId = roleIdOf(roleText, username, firstNumber(root.roleId, user.roleId, claims.roleId))
+    const permissions =
+      normalizePermissions(root.permissions) ??
+      normalizePermissions(user.permissions) ??
+      normalizePermissions(claims.permissions)
+
     auth.setSession({
-      token: result.token,
-      username: result.username ?? form.username.trim(),
-      realName: result.realName ?? form.username.trim(),
-      role: result.role,
-      roleId: result.roleId ?? (result.role === 'admin' ? 1 : 2),
-      userId: result.userId ?? 0,
-      permissions: result.permissions,
+      token,
+      username,
+      realName: firstString(root.realName, user.realName, claims.realName, username),
+      role: roleText || roleNameOf(roleId),
+      roleId,
+      userId: firstNumber(root.userId, user.userId, claims.userId) ?? 0,
+      permissions,
     })
     await router.push('/')
   } catch (error) {
